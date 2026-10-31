@@ -1,0 +1,10 @@
+.recruiter-review-page{display:flex;flex-direction:column;gap:18px}
+.recruiter-review-intro{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:14px;padding:18px 20px}
+.recruiter-review-intro-icon{height:42px;width:42px;display:grid;place-items:center;border-radius:12px;background:#edf1ff;color:#6881e2}
+.recruiter-review-intro-copy h1{margin:7px 0 4px;color:#222a45;font:700 23px Manrope,sans-serif;letter-spacing:-.7px}
+.recruiter-review-intro-copy p{margin:0;color:#858da2;font-size:11px;line-height:1.55}
+.recruiter-review-note{grid-column:1/-1;display:flex;align-items:flex-start;gap:8px;padding-top:11px;border-top:1px solid #eff0f5;color:#7e879e;font-size:10px;line-height:1.5}
+.recruiter-review-note svg{flex:none;color:#798bcf}
+.recruiter-review-workspace{scroll-margin-top:80px;min-width:0}
+.recruiter-review-empty-actions{display:flex;justify-content:center;gap:9px;flex-wrap:wrap;margin-top:14px}
+@media(max-width:600px){.recruiter-review-intro{grid-template-columns:auto minmax(0,1fr);padding:14px}.recruiter-review-intro>.button-primary{grid-column:1/-1;justify-self:stretch}.recruiter-review-note{font-size:9px}}

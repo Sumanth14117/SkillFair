@@ -7,6 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test:review": "node --test tests/recruiter-review.test.mjs",
+    "test:auth": "node --experimental-strip-types --test tests/auth-client.test.mjs",
+    "test:session": "node --experimental-strip-types --test tests/session-persistence.test.mjs",
+    "test:impact": "node --experimental-strip-types --test tests/impact-measurement.test.mjs tests/impact-measurement-ui.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

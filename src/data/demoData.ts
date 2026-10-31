@@ -1,4 +1,4 @@
-// Illustrative demo content for the Milestone 1 frontend. Not connected to a live system.
+// Illustrative demo content only. These values are not live records or measured outcomes.
 export const pipelineData = [
   { week: 'Aug 05', reviewed: 22, matched: 13 }, { week: 'Aug 12', reviewed: 34, matched: 21 },
   { week: 'Aug 19', reviewed: 28, matched: 18 }, { week: 'Aug 26', reviewed: 46, matched: 30 },
@@ -13,14 +13,16 @@ export const activities = [
 ]
 
 export const candidates = [
-  { initials: 'JL', name: 'Jordan Lee', role: 'Product Designer', location: 'Austin, TX', score: 94, skills: ['Figma', 'Design systems', 'Prototyping'], tone: 'violet', note: 'Strong match' },
-  { initials: 'SK', name: 'Samira Khan', role: 'UX Researcher', location: 'Remote · US', score: 89, skills: ['User research', 'Analytics', 'Facilitation'], tone: 'blue', note: 'Great potential' },
-  { initials: 'MR', name: 'Marcus Reed', role: 'Product Designer', location: 'Brooklyn, NY', score: 86, skills: ['Interaction design', 'Figma', 'Accessibility'], tone: 'peach', note: 'Strong match' },
+  { initials: 'JL', name: 'Jordan Lee', role: 'Product Designer', location: 'Austin, TX', skills: ['Figma', 'Design systems', 'Prototyping'], tone: 'violet' },
+  { initials: 'SK', name: 'Samira Khan', role: 'UX Researcher', location: 'Remote · US', skills: ['User research', 'Analytics', 'Facilitation'], tone: 'blue' },
+  { initials: 'MR', name: 'Marcus Reed', role: 'Product Designer', location: 'Brooklyn, NY', skills: ['Interaction design', 'Figma', 'Accessibility'], tone: 'peach' },
 ]
 
 export const sections = [
-  { name: 'Overview', icon: 'LayoutDashboard' }, { name: 'Skills Discovery', icon: 'Sparkles' },
+  { name: 'Overview', icon: 'LayoutDashboard' }, { name: 'Impact Measurement', icon: 'Activity' }, { name: 'Skills Discovery', icon: 'Sparkles' },
   { name: 'Market Intelligence', icon: 'ChartNoAxesCombined' }, { name: 'Learning Pathways', icon: 'GraduationCap' },
+  { name: 'Transferable Skills', icon: 'ArrowLeftRight' },
+  { name: 'Career Orchestrator', icon: 'BriefcaseBusiness' },
   { name: 'Inclusive Matching', icon: 'UsersRound' }, { name: 'Bias Audit', icon: 'ScanSearch' },
   { name: 'Recruiter Review', icon: 'ClipboardCheck' },
 ]
