@@ -1,18 +1,21 @@
 import re
 import unicodedata
 
-from .models import JobMatchRequest, JobMatchResponse, SkillMatch
+from .models import JobMatchRequest, JobMatchResponse, SkillEvidence, SkillMatch
 
 
 def _normalize_skill(value: str) -> str:
     folded = unicodedata.normalize("NFKC", value).casefold()
-    return " ".join(re.findall(r"\w+", folded))
+    # Keep programming-language symbols meaningful, but ignore spacing around them.
+    folded = re.sub(r"\s*([+#])\s*", r"\1", folded)
+    # Other punctuation remains a separator, preserving the existing token matching behavior.
+    return " ".join(re.findall(r"[\w+#]+", folded))
 
 
-def match_job_skills(request: JobMatchRequest) -> JobMatchResponse:
-    """Match recruiter requirements to supplied evidence by normalized exact name only."""
+def match_job_skills(request: JobMatchRequest, candidate_skills: list[SkillEvidence]) -> JobMatchResponse:
+    """Match recruiter requirements to stored evidence by normalized exact name only."""
     indexed: dict[str, list] = {}
-    for skill in request.candidate_skills:
+    for skill in candidate_skills:
         key = _normalize_skill(skill.skill_name)
         if key:
             indexed.setdefault(key, []).append(skill)
@@ -36,6 +39,7 @@ def match_job_skills(request: JobMatchRequest) -> JobMatchResponse:
             required_skill=display_requirement,
             candidate_skill=candidate.skill_name,
             evidence_type=candidate.evidence_type,
+            detection_method=candidate.detection_method,
             validation_status=candidate.validation_status,
             supporting_excerpt=candidate.supporting_excerpt,
             relevance_explanation=candidate.relevance_explanation,
