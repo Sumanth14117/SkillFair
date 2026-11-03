@@ -103,16 +103,28 @@ function jsonRequest(email: string, password: string): RequestInit {
 
 const currentUserRequests = new WeakMap<typeof fetch, Promise<AuthUser>>()
 
-export function getCurrentUser(fetcher: typeof fetch = fetch): Promise<AuthUser> {
+export function getCurrentUser(fetcher: typeof fetch = fetch, force = false): Promise<AuthUser> {
   const existing = currentUserRequests.get(fetcher)
-  if (existing) return existing
-  const pending = requestUser('/api/auth/me', { method: 'GET' }, fetcher).finally(() => currentUserRequests.delete(fetcher))
+  if (existing && !force) return existing
+  const pending = requestUser('/api/auth/me', { method: 'GET' }, fetcher).finally(() => {
+    if (currentUserRequests.get(fetcher) === pending) currentUserRequests.delete(fetcher)
+  })
   currentUserRequests.set(fetcher, pending)
   return pending
 }
 
-export function registerAccount(email: string, password: string, fetcher: typeof fetch = fetch): Promise<AuthUser> {
-  return requestUser('/api/auth/register', jsonRequest(email, password), fetcher)
+export function registerAccount(email: string, password: string, fetcher: typeof fetch = fetch): Promise<void> {
+  return requestWithTimeout('/api/auth/register', jsonRequest(email, password), fetcher, async (response) => {
+    if (!response.ok) throw await responseError(response)
+    let payload: unknown
+    try { payload = await response.json() } catch {
+      throw new AuthApiError('The authentication service returned an unexpected response.', response.status)
+    }
+    if (response.status !== 202 || !payload || typeof payload !== 'object' || !('message' in payload)
+      || payload.message !== 'Registration request processed. If the address already has an account, sign in. No verification email is sent.') {
+      throw new AuthApiError('The authentication service returned an unexpected response.', response.status)
+    }
+  })
 }
 
 export function loginAccount(email: string, password: string, fetcher: typeof fetch = fetch): Promise<AuthUser> {

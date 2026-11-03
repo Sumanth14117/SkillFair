@@ -218,7 +218,14 @@ class _TestCase:
             json={"email": email, "password": password},
             headers={"Origin": _ORIGIN},
         )
-        assert response.status_code == 201
+        assert response.status_code == 202
+        login = client.post(
+            "/api/auth/login",
+            json={"email": email, "password": password},
+            headers={"Origin": _ORIGIN},
+        )
+        assert login.status_code == 200
+        assert client.cookies.get(SESSION_COOKIE_NAME)
         return client, email, password
 
     def additional_session(self, email: str, password: str, existing: httpx.Client) -> httpx.Client:

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Activity, ArrowLeftRight, ArrowRight, Bell, BriefcaseBusiness, ChartNoAxesCombined,
   Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, ClipboardCheck, Command, FileSearch,
@@ -18,11 +18,12 @@ import CareerOrchestrator, { type CareerWorkflowDraft, type CareerWorkflowRun } 
 import RecruiterReview from './components/RecruiterReview'
 import ImpactMeasurement from './components/ImpactMeasurement'
 import AuthPage from './components/AuthPage'
-import { authDisplayName } from './authClient'
+import { authDisplayName, type AuthUser } from './authClient'
 import { skillFairFetch } from './apiClient'
-import { useAuth } from './authContext'
+import { useAuth, type AuthContextValue } from './authContext'
 import type { SkillEvidence, SkillsDiscoveryResult } from './types/skills'
-import { emptySkillFairSession, isValidSessionLocator, readSkillFairSession, writeSkillFairSession, type AppPage } from './sessionState'
+import { clearSkillFairSession, emptySkillFairSession, isValidSessionLocator, readSkillFairSession, writeSkillFairSession, type AppPage } from './sessionState'
+import { restoreSavedWorkflow } from './workflowRestoration'
 
 const iconMap = { LayoutDashboard, Sparkles, ChartNoAxesCombined, GraduationCap, UsersRound, ScanSearch, ClipboardCheck, ArrowLeftRight, BriefcaseBusiness, Activity }
 type Page = AppPage
@@ -110,7 +111,19 @@ function ModulePage({ page }: { page: Page }) {
 
 export default function App() {
   const auth = useAuth()
-  const [initialSession] = useState(readSkillFairSession)
+  useEffect(() => {
+    if (auth.status === 'anonymous') clearSkillFairSession()
+  }, [auth.status])
+
+  if (auth.status === 'loading') return <main className="auth-status-screen" role="status"><div className="auth-status-mark"><span /><span /><span /><span /></div><strong>Restoring your SkillFair session…</strong><span>Checking your secure account session.</span></main>
+  if (auth.status === 'error') return <main className="auth-status-screen"><div className="auth-status-mark"><span /><span /><span /><span /></div><strong>SkillFair is temporarily unavailable</strong><span>{auth.error}</span><button className="auth-submit" onClick={auth.retryCurrentUser}>Retry connection <ArrowRight size={16} /></button></main>
+  if (auth.status === 'anonymous' || !auth.user) return <AuthPage onLogin={auth.login} onRegister={auth.register} serviceError={auth.error} />
+
+  return <AuthenticatedApp key={auth.user.id} auth={auth} user={auth.user} />
+}
+
+function AuthenticatedApp({ auth, user }: { auth: AuthContextValue; user: AuthUser }) {
+  const [initialSession] = useState(() => readSkillFairSession(auth.user!.id))
   const [page, setPage] = useState<Page>(initialSession.page)
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -123,6 +136,7 @@ export default function App() {
   const [analysisSkills, setAnalysisSkills] = useState<SkillEvidence[]>([])
   const [careerRun, setCareerRun] = useState<CareerWorkflowRun | null>(null)
   const [careerRunId, setCareerRunId] = useState<string | null>(null)
+  const restoreRunId = useRef<string | null>(initialSession.runId)
   const [careerDraft, setCareerDraft] = useState<CareerWorkflowDraft>(initialSession.careerDraft)
   const [accountRestore, setAccountRestore] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [accountRestoreError, setAccountRestoreError] = useState('')
@@ -132,6 +146,7 @@ export default function App() {
   useEffect(() => {
     if (auth.status !== 'authenticated') return
     let active = true
+    const restoreController = new AbortController()
     setAccountRestore('loading')
     setAccountRestoreError('')
     setAnalysisId(null)
@@ -142,34 +157,32 @@ export default function App() {
     setCareerRunId(null)
     const restore = async () => {
       try {
-        const [analysisResponse, workflowsResponse] = await Promise.all([
-          skillFairFetch('/api/skills/analyses/latest'),
-          skillFairFetch('/api/career/orchestrator/runs?limit=20'),
+        const [analysisResponse, workflowResult] = await Promise.all([
+          skillFairFetch('/api/skills/analyses/latest', { signal: restoreController.signal }),
+          restoreSavedWorkflow(restoreRunId.current, skillFairFetch, restoreController.signal),
         ])
-        if (!analysisResponse.ok || !workflowsResponse.ok) throw new Error('Saved account data could not be restored. Retry when the service is available.')
+        if (!analysisResponse.ok) throw new Error('Saved account data could not be restored. Retry when the service is available.')
         const analysis = await analysisResponse.json() as { analysis_id?: unknown; analysis_mode?: unknown; skills?: unknown[] } | null
-        const workflows = await workflowsResponse.json() as unknown
         if (analysis !== null && (typeof analysis.analysis_id !== 'string' || !Array.isArray(analysis.skills) || !analysis.skills.every(isSkillEvidence) || !['ai', 'local', 'development'].includes(String(analysis.analysis_mode)))) {
           throw new Error('The saved Skills Discovery record had an unsupported format.')
         }
-        if (!Array.isArray(workflows)) throw new Error('The saved workflow list had an unsupported format.')
-        const first = workflows[0] as { run_id?: unknown; job_title?: unknown; job_description?: unknown; geography?: unknown; essential_skills?: unknown; preferred_skills?: unknown; workflow?: CareerWorkflowRun } | undefined
         if (active && analysis) {
           setAnalysisId(analysis.analysis_id as string)
           setSkillCount((analysis.skills as unknown[]).length)
           setAnalysisMode(analysis.analysis_mode as SkillsDiscoveryResult['analysis_mode'])
           setAnalysisSkills(analysis.skills as SkillEvidence[])
         }
-        if (active && first && typeof first.run_id === 'string' && first.workflow && first.workflow.run_id === first.run_id) {
-          setCareerRun(first.workflow)
-          setCareerRunId(first.run_id)
-          setCareerDraft({
-            jobTitle: typeof first.job_title === 'string' ? first.job_title : '',
-            jobDescription: typeof first.job_description === 'string' ? first.job_description : '',
-            geography: typeof first.geography === 'string' ? first.geography : '',
-            essentialSkills: Array.isArray(first.essential_skills) ? first.essential_skills.join('\n') : '',
-            preferredSkills: Array.isArray(first.preferred_skills) ? first.preferred_skills.join('\n') : '',
-          })
+        if (active && workflowResult.kind === 'restored') {
+          setCareerRun(workflowResult.run)
+          setCareerRunId(workflowResult.run.run_id)
+        } else if (active && workflowResult.kind === 'missing') {
+          restoreRunId.current = null
+          setCareerRun(null)
+          setCareerRunId(null)
+          writeSkillFairSession({ ...readSkillFairSession(auth.user!.id), runId: null })
+          setAccountRestoreError('The saved workflow is no longer available to this account. Its reference was cleared; start a new workflow to continue.')
+          setAccountRestore('error')
+          return
         }
         if (active) setAccountRestore('ready')
       } catch (reason) {
@@ -179,28 +192,14 @@ export default function App() {
       }
     }
     void restore()
-    return () => { active = false }
-  }, [auth.status, restoreAttempt])
+    return () => { active = false; restoreController.abort() }
+  }, [auth.status, auth.user, restoreAttempt])
   useEffect(() => {
     if (auth.status !== 'authenticated') return
-    writeSkillFairSession({ analysisId, skillCount, analysisMode, page, runId: careerRunId, careerDraft })
-  }, [auth.status, analysisId, skillCount, analysisMode, page, careerRunId, careerDraft])
-  useEffect(() => {
-    if (auth.status !== 'anonymous') return
-    const empty = emptySkillFairSession()
-    writeSkillFairSession(empty)
-    setPage(empty.page)
-    setAnalysisId(empty.analysisId)
-    setSkillCount(empty.skillCount)
-    setAnalysisMode(empty.analysisMode)
-    setAnalysisSkills([])
-    setCareerRun(null)
-    setCareerRunId(empty.runId)
-    setCareerDraft(empty.careerDraft)
-    setAccountRestore('idle')
-  }, [auth.status])
+    writeSkillFairSession({ ownerId: auth.user!.id, analysisId, skillCount, analysisMode, page, runId: careerRunId, careerDraft })
+  }, [auth.status, auth.user, analysisId, skillCount, analysisMode, page, careerRunId, careerDraft])
   function rememberAnalysis(id: string, count: number, mode: SkillsDiscoveryResult['analysis_mode'], skills: SkillEvidence[]) {
-    writeSkillFairSession({ analysisId: id, skillCount: count, analysisMode: mode, page, runId: careerRunId, careerDraft })
+    writeSkillFairSession({ ownerId: auth.user!.id, analysisId: id, skillCount: count, analysisMode: mode, page, runId: careerRunId, careerDraft })
     setAnalysisId(id)
     setSkillCount(count)
     setAnalysisMode(mode)
@@ -211,7 +210,8 @@ export default function App() {
     if (run !== null && !isValidSessionLocator(nextRunId)) {
       throw new Error('The workflow service returned an invalid run reference. The result was not saved.')
     }
-    writeSkillFairSession({ analysisId, skillCount, analysisMode, page, runId: nextRunId, careerDraft })
+    writeSkillFairSession({ ownerId: auth.user!.id, analysisId, skillCount, analysisMode, page, runId: nextRunId, careerDraft })
+    restoreRunId.current = nextRunId
     setCareerRun(run)
     setCareerRunId(nextRunId)
   }
@@ -223,6 +223,7 @@ export default function App() {
   }
   function handleRunExpired(runId: string) {
     if (careerRunId === runId) {
+      restoreRunId.current = null
       setCareerRun(null)
       setCareerRunId(null)
     }
@@ -236,8 +237,9 @@ export default function App() {
     setAuthActionError(null)
     try {
       await auth.logout()
-      const empty = emptySkillFairSession()
+      const empty = emptySkillFairSession(auth.user!.id)
       writeSkillFairSession(empty)
+      restoreRunId.current = null
       setAnalysisId(null)
       setSkillCount(0)
       setAnalysisMode(null)
@@ -253,10 +255,6 @@ export default function App() {
     }
   }
 
-  if (auth.status === 'loading') return <main className="auth-status-screen" role="status"><div className="auth-status-mark"><span /><span /><span /><span /></div><strong>Restoring your SkillFair session…</strong><span>Checking your secure account session.</span></main>
-  if (auth.status === 'error') return <main className="auth-status-screen"><div className="auth-status-mark"><span /><span /><span /><span /></div><strong>SkillFair is temporarily unavailable</strong><span>{auth.error}</span><button className="auth-submit" onClick={auth.retryCurrentUser}>Retry connection <ArrowRight size={16} /></button></main>
-  if (auth.status === 'anonymous' || !auth.user) return <AuthPage onLogin={auth.login} onRegister={auth.register} serviceError={authActionError} />
-
-  const displayName = authDisplayName(auth.user)
-  return <div className="app-shell"><Sidebar page={page === 'Job Matching' ? 'Overview' : page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} userEmail={auth.user.email} onLogout={handleLogout} logoutBusy={logoutBusy} /><main className="main-area"><Topbar page={page} userEmail={auth.user.email} onMenu={() => setMobileOpen(true)} onNotice={() => setNotice(true)} onLogout={handleLogout} logoutBusy={logoutBusy} />{accountRestore === 'loading' && <div className="account-restore-banner" role="status">Restoring your saved analyses and workflows…</div>}{accountRestore === 'error' && <div className="account-restore-banner account-restore-error" role="alert">{accountRestoreError}<button type="button" onClick={() => setRestoreAttempt((attempt) => attempt + 1)}>Retry restoration</button></div>}<div className="content-wrap">{page === 'Overview' ? <Overview setPage={setPage} greetingName={displayName} /> : page === 'Impact Measurement' ? <ImpactMeasurement /> : page === 'Skills Discovery' ? <SkillsDiscovery restoredAnalysis={analysisId && analysisMode ? { analysisId, analysisMode, skills: analysisSkills } : null} onAnalysisReady={rememberAnalysis} onContinue={continueToMatching} /> : page === 'Job Matching' ? <JobMatching analysisId={analysisId} skillCount={skillCount} analysisMode={analysisMode} onAnalysisExpired={invalidateAnalysis} onBack={() => setPage('Skills Discovery')} /> : page === 'Bias Audit' ? <BiasAudit /> : page === 'Learning Pathways' ? <LearningPathways analysisId={analysisId} onAnalysisExpired={invalidateAnalysis} onSkillsDiscovery={() => setPage('Skills Discovery')} /> : page === 'Market Intelligence' ? <MarketIntelligence /> : page === 'Transferable Skills' ? <TransferableSkills analysisId={analysisId} onAnalysisExpired={invalidateAnalysis} /> : page === 'Inclusive Matching' ? <InclusiveMatching analysisId={analysisId} onAnalysisExpired={invalidateAnalysis} onSkillsDiscovery={() => setPage('Skills Discovery')} /> : page === 'Career Orchestrator' ? <CareerOrchestrator analysisId={analysisId} run={careerRun} runId={careerRunId} onRunChange={handleRunChange} onRunExpired={handleRunExpired} onAnalysisExpired={invalidateAnalysis} draft={careerDraft} onDraftChange={setCareerDraft} onSkillsDiscovery={() => setPage('Skills Discovery')} /> : page === 'Recruiter Review' ? <RecruiterReview analysisId={analysisId} run={careerRun} runId={careerRunId} onRunChange={handleRunChange} onRunExpired={handleRunExpired} onAnalysisExpired={invalidateAnalysis} draft={careerDraft} onDraftChange={setCareerDraft} onSkillsDiscovery={() => setPage('Skills Discovery')} onOpenOrchestrator={() => setPage('Career Orchestrator')} /> : <ModulePage page={page} />}</div></main>{(notice || authActionError) && <div className={`toast ${authActionError ? 'toast-error' : ''}`} role={authActionError ? 'alert' : 'status'}>{authActionError ? authActionError : <><Check size={16} />You’re all caught up</>}<button onClick={() => { setNotice(false); setAuthActionError(null) }} aria-label="Dismiss"><X size={15} /></button></div>}</div>
+  const displayName = authDisplayName(user)
+  return <div className="app-shell"><Sidebar page={page === 'Job Matching' ? 'Overview' : page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} userEmail={user.email} onLogout={handleLogout} logoutBusy={logoutBusy} /><main className="main-area"><Topbar page={page} userEmail={user.email} onMenu={() => setMobileOpen(true)} onNotice={() => setNotice(true)} onLogout={handleLogout} logoutBusy={logoutBusy} />{accountRestore === 'loading' && <div className="account-restore-banner" role="status">Restoring your saved analyses and workflows…</div>}{accountRestore === 'error' && <div className="account-restore-banner account-restore-error" role="alert">{accountRestoreError}<button type="button" onClick={() => setRestoreAttempt((attempt) => attempt + 1)}>Retry restoration</button></div>}<div className="content-wrap">{page === 'Overview' ? <Overview setPage={setPage} greetingName={displayName} /> : page === 'Impact Measurement' ? <ImpactMeasurement /> : page === 'Skills Discovery' ? <SkillsDiscovery restoredAnalysis={analysisId && analysisMode ? { analysisId, analysisMode, skills: analysisSkills } : null} onAnalysisReady={rememberAnalysis} onContinue={continueToMatching} /> : page === 'Job Matching' ? <JobMatching analysisId={analysisId} skillCount={skillCount} analysisMode={analysisMode} onAnalysisExpired={invalidateAnalysis} onBack={() => setPage('Skills Discovery')} /> : page === 'Bias Audit' ? <BiasAudit /> : page === 'Learning Pathways' ? <LearningPathways analysisId={analysisId} onAnalysisExpired={invalidateAnalysis} onSkillsDiscovery={() => setPage('Skills Discovery')} /> : page === 'Market Intelligence' ? <MarketIntelligence /> : page === 'Transferable Skills' ? <TransferableSkills analysisId={analysisId} onAnalysisExpired={invalidateAnalysis} /> : page === 'Inclusive Matching' ? <InclusiveMatching analysisId={analysisId} onAnalysisExpired={invalidateAnalysis} onSkillsDiscovery={() => setPage('Skills Discovery')} /> : page === 'Career Orchestrator' ? <CareerOrchestrator ownerId={user.id} analysisId={analysisId} run={careerRun} runId={careerRunId} onRunChange={handleRunChange} onRunExpired={handleRunExpired} onAnalysisExpired={invalidateAnalysis} draft={careerDraft} onDraftChange={setCareerDraft} onSkillsDiscovery={() => setPage('Skills Discovery')} /> : page === 'Recruiter Review' ? <RecruiterReview ownerId={user.id} analysisId={analysisId} run={careerRun} runId={careerRunId} onRunChange={handleRunChange} onRunExpired={handleRunExpired} onAnalysisExpired={invalidateAnalysis} draft={careerDraft} onDraftChange={setCareerDraft} onSkillsDiscovery={() => setPage('Skills Discovery')} onOpenOrchestrator={() => setPage('Career Orchestrator')} /> : <ModulePage page={page} />}</div></main>{(notice || authActionError) && <div className={`toast ${authActionError ? 'toast-error' : ''}`} role={authActionError ? 'alert' : 'status'}>{authActionError ? authActionError : <><Check size={16} />You’re all caught up</>}<button onClick={() => { setNotice(false); setAuthActionError(null) }} aria-label="Dismiss"><X size={15} /></button></div>}</div>
 }

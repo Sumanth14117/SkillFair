@@ -33,7 +33,7 @@ from .impact_persistence import (
 from .database import check_database_health, dispose_database_engine, get_db_session
 from .market_intelligence import MarketDataProviderError, market_intelligence_service
 from .matching import match_job_skills
-from .protections import RateLimitMiddleware, RequestBodyLimitMiddleware
+from .protections import RateLimitMiddleware, RequestBodyLimitMiddleware, SecurityHeadersMiddleware
 from .transferable_skills import build_transferable_skills
 from .models import (
     BiasAuditRequest,
@@ -121,6 +121,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(auth_router)
 
 

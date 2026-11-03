@@ -256,6 +256,8 @@ def list_workflows(db: Session, owner_user_id: UUID, limit: int = 30) -> list[Ca
             geography=row.geography,
             essential_skills=list(row.essential_skills),
             preferred_skills=list(row.preferred_skills),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
             workflow=response,
         ))
     return items

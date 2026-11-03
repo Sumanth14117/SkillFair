@@ -4,6 +4,7 @@ import { sections } from './data/demoData.ts'
 
 export type AppPage = typeof sections[number]['name'] | 'Job Matching'
 export type SkillFairSession = {
+  ownerId: string
   analysisId: string | null
   skillCount: number
   analysisMode: SkillsDiscoveryResult['analysis_mode'] | null
@@ -12,24 +13,25 @@ export type SkillFairSession = {
   careerDraft: CareerWorkflowDraft
 }
 
-const STORAGE_KEY = 'skillfair.session.v1'
+const STORAGE_KEY = 'skillfair.session.v2'
+const LEGACY_STORAGE_KEY = 'skillfair.session.v1'
 const DEFAULT_DRAFT: CareerWorkflowDraft = { jobTitle: '', jobDescription: '', geography: '', essentialSkills: '', preferredSkills: '' }
 const VALID_PAGES = new Set<AppPage>([...sections.map((item) => item.name), 'Job Matching'])
 const LOCATOR_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
 const DRAFT_LIMITS: Record<keyof CareerWorkflowDraft, number> = { jobTitle: 160, jobDescription: 10000, geography: 120, essentialSkills: 7000, preferredSkills: 7000 }
 
-export const emptySkillFairSession = (): SkillFairSession => ({
-  analysisId: null, skillCount: 0, analysisMode: null, page: 'Overview', runId: null, careerDraft: { ...DEFAULT_DRAFT },
+export const emptySkillFairSession = (ownerId = ''): SkillFairSession => ({
+  ownerId, analysisId: null, skillCount: 0, analysisMode: null, page: 'Overview', runId: null, careerDraft: { ...DEFAULT_DRAFT },
 })
 
 export function isValidSessionLocator(value: unknown): value is string {
   return typeof value === 'string' && LOCATOR_PATTERN.test(value)
 }
 
-function parseSession(value: unknown): SkillFairSession | null {
+function parseSession(value: unknown, expectedOwnerId: string): SkillFairSession | null {
   if (!value || typeof value !== 'object') return null
   const candidate = value as Record<string, unknown>
-  if (candidate.version !== 1) return null
+  if (candidate.version !== 2 || candidate.ownerId !== expectedOwnerId) return null
   const page = candidate.page
   const draft = candidate.careerDraft
   if (typeof page !== 'string' || !VALID_PAGES.has(page as AppPage) || !draft || typeof draft !== 'object') return null
@@ -42,6 +44,7 @@ function parseSession(value: unknown): SkillFairSession | null {
   if (candidate.analysisMode !== null && candidate.analysisMode !== 'ai' && candidate.analysisMode !== 'local' && candidate.analysisMode !== 'development') return null
   if ((!candidate.analysisId && (candidate.skillCount !== 0 || candidate.analysisMode !== null)) || (candidate.analysisId && candidate.analysisMode === null)) return null
   return {
+    ownerId: expectedOwnerId,
     analysisId: candidate.analysisId as string | null,
     skillCount: candidate.skillCount as number,
     analysisMode: candidate.analysisMode as SkillsDiscoveryResult['analysis_mode'] | null,
@@ -51,20 +54,34 @@ function parseSession(value: unknown): SkillFairSession | null {
   }
 }
 
-export function readSkillFairSession(): SkillFairSession {
+export function clearSkillFairSession(): void {
   try {
+    window.sessionStorage.removeItem(STORAGE_KEY)
+    window.sessionStorage.removeItem(LEGACY_STORAGE_KEY)
+  } catch { /* Storage may be unavailable. */ }
+}
+
+export function readSkillFairSession(expectedOwnerId: string): SkillFairSession {
+  try {
+    // Version 1 did not bind drafts to an account, so it cannot be safely restored.
+    try { window.sessionStorage.removeItem(LEGACY_STORAGE_KEY) } catch { /* Storage may be unavailable. */ }
     const raw = window.sessionStorage.getItem(STORAGE_KEY)
-    if (!raw) return emptySkillFairSession()
-    const parsed = parseSession(JSON.parse(raw) as unknown)
+    if (!raw) return emptySkillFairSession(expectedOwnerId)
+    const parsed = parseSession(JSON.parse(raw) as unknown, expectedOwnerId)
     if (parsed) return parsed
     try { window.sessionStorage.removeItem(STORAGE_KEY) } catch { /* Storage may be unavailable. */ }
   } catch { /* Private browsing and storage policy can block access. */ }
-  return emptySkillFairSession()
+  return emptySkillFairSession(expectedOwnerId)
 }
 
 export function writeSkillFairSession(session: SkillFairSession): void {
+  if (!session.ownerId || session.ownerId.length > 128) {
+    clearSkillFairSession()
+    return
+  }
   const safeAnalysisId = session.analysisId && isValidSessionLocator(session.analysisId) ? session.analysisId : null
   const safe: SkillFairSession = {
+    ownerId: session.ownerId,
     analysisId: safeAnalysisId,
     skillCount: safeAnalysisId && Number.isInteger(session.skillCount) && session.skillCount >= 0 ? session.skillCount : 0,
     analysisMode: safeAnalysisId && (session.analysisMode === 'ai' || session.analysisMode === 'local' || session.analysisMode === 'development') ? session.analysisMode : null,
@@ -76,5 +93,5 @@ export function writeSkillFairSession(session: SkillFairSession): void {
       return [draftKey, typeof value === 'string' ? value.slice(0, DRAFT_LIMITS[draftKey]) : '']
     })) as CareerWorkflowDraft,
   }
-  try { window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, ...safe })) } catch { /* Persistence is best-effort only. */ }
+  try { window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 2, ...safe })) } catch { /* Persistence is best-effort only. */ }
 }

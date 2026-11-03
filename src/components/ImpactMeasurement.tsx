@@ -55,7 +55,6 @@ function DurationEmptyChart({ points, minimumSample, availability }: { points: T
 
 export default function ImpactMeasurement() {
   const auth = useAuth()
-  const retryCurrentUser = auth.retryCurrentUser
   const accountId = auth.user?.id ?? ''
   const [summary, setSummary] = useState<Summary | null>(null)
   const [summaryOwnerId, setSummaryOwnerId] = useState('')
@@ -93,7 +92,6 @@ export default function ImpactMeasurement() {
         if (response.status === 401) {
           if (requestTracker.current.isCurrent(request, accountId)) {
             setLoadError(message)
-            retryCurrentUser()
           }
           return
         }
@@ -110,7 +108,7 @@ export default function ImpactMeasurement() {
     } finally {
       if (requestTracker.current.isCurrent(request, accountId)) setLoading(false)
     }
-  }, [accountId, retryCurrentUser])
+  }, [accountId])
 
   useEffect(() => {
     const tracker = requestTracker.current
@@ -138,7 +136,6 @@ export default function ImpactMeasurement() {
     setSummary(null)
     setSummaryOwnerId('')
     setLoadError('Your sign-in session has expired. Sign in again to view account-scoped measurements.')
-    auth.retryCurrentUser()
   }
 
   async function submitRating(event: FormEvent<HTMLFormElement>) {

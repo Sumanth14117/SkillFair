@@ -14,6 +14,9 @@ _ADJACENT_CAPABILITIES: dict[str, dict[str, str]] = {
         "data querying": "SQL querying can be relevant to retrieving and shaping structured data; it does not establish statistical analysis or business interpretation.",
         "data reporting": "SQL experience may support assembling data for reports; it does not establish visualization, interpretation, or reporting ownership.",
     },
+    "fastapi": {
+        "rest apis": "FastAPI experience may be relevant to implementing HTTP APIs; it does not establish REST design, resource modeling, or API contract experience.",
+    },
     "excel": {
         "spreadsheet analysis": "Spreadsheet work may transfer to organizing and examining tabular information; it does not establish advanced analytics or statistical methods.",
         "data reporting": "Spreadsheet experience may support preparing tabular reports; it does not establish reporting design or interpretation.",

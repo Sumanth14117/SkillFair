@@ -12,7 +12,7 @@ Traditional screening can over-rely on career history, credentials, and resume k
 
 - Frontend: React, TypeScript, Vite, Tailwind CSS, Recharts, Lucide icons.
 - Backend: Python, FastAPI, Pydantic.
-- Database foundation: SQLAlchemy 2.x, PostgreSQL/psycopg and Alembic initial schema are prepared; the migration has not been applied and application features still use their current in-memory stores.
+- Persistence: SQLAlchemy 2.x, PostgreSQL/psycopg and Alembic; revision `202610310001` has been applied to the local SkillFair database. Registered account-owned analysis, workflow, review, and impact routes use PostgreSQL. In-memory stores remain only for isolated domain/test adapters.
 - Resume extraction: PDF and DOCX text extraction with temporary multipart spooling as needed; uploads are not intentionally retained as permanent application files.
 - Optional Skills Discovery providers: Google Gemini or Groq, configured only on the backend. Local deterministic analysis remains the default.
 - Backend tests: pytest. Frontend checks: ESLint and TypeScript/Vite production build.
@@ -31,7 +31,7 @@ The orchestrator presents a compact Skill Passport summary from that validated a
 
 ### Job Requirement Audit / Bias Audit
 
-`POST /api/jobs/audit` runs deterministic checks for selected credential requirements, potentially exclusionary wording, vague requirements, and experience thresholds. Findings identify potential concerns for human review. A finding is not proof of discrimination or unfairness and does not establish legal compliance; absence of findings does not establish fairness.
+`POST /api/jobs/audit` runs deterministic checks for selected credential requirements, potentially exclusionary wording, vague requirements, experience thresholds, and explicit employment-continuity restrictions such as continuous-experience requirements or prohibitions on employment gaps. Findings identify potential concerns for human review. A finding is not proof of discrimination or unfairness and does not establish legal compliance; absence of findings does not establish fairness.
 
 ### Transferable Skills
 
@@ -59,7 +59,7 @@ Impact metrics are descriptive account-level prototype measurements. Account ass
 
 ### Career Orchestrator
 
-`POST /api/career/orchestrator/runs` coordinates the Skill Passport summary, Market Intelligence status, Job Audit, Inclusive Matching, pending Human Review, and blocked Learning Pathways. Authenticated workflows and review decisions are stored in PostgreSQL and scoped to the account session. `GET /api/career/orchestrator/runs` lists the current account's saved workflows for recovery after login; `GET /api/career/orchestrator/runs/{run_id}` retrieves one owner-scoped workflow. `POST /api/career/orchestrator/runs/{run_id}/review` accepts an explicit `proceed`, `revise`, or `stop` decision and reviewed requirement identifiers. Learning activities are generated only after a committed `proceed`; revise and stop do not generate them. The decision is associated with the authenticated account, but this is not independent recruiter identity verification or an immutable production audit record. Free-text review notes are not persisted.
+`POST /api/career/orchestrator/runs` coordinates the Skill Passport summary, Market Intelligence status, Job Audit, Inclusive Matching, pending Human Review, and blocked Learning Pathways. Authenticated workflows and review decisions are stored in PostgreSQL and scoped to the account session. `GET /api/career/orchestrator/runs?limit=20` lists up to 20 of the signed-in account's unexpired workflows, newest first, with persisted creation/update timestamps and status; the Career Orchestrator's Recent Workflows section lets the owner reopen a selected run. Reopening always fetches that exact owner-scoped `run_id` through `GET /api/career/orchestrator/runs/{run_id}`; there is no latest-workflow fallback. `POST /api/career/orchestrator/runs/{run_id}/review` accepts an explicit `proceed`, `revise`, or `stop` decision and reviewed requirement identifiers. Learning activities are generated only after a committed `proceed`; revise and stop do not generate them. The decision is associated with the authenticated account, but this is not independent recruiter identity verification or an immutable production audit record. Free-text review notes are not persisted.
 
 Recruiter Review presents the current backend-backed Career Orchestrator workflow and reuses its review controls. It is not a multi-candidate queue. The Overview dashboard is illustrative: its names, figures, chart points, activity, and profiles are sample content, not live candidate records or measured outcomes.
 
@@ -92,7 +92,7 @@ Request and response field definitions are maintained in `backend/app/models.py`
 
 ## Local setup
 
-Prerequisites: Python 3.11 or newer, Node.js with npm, and a modern browser.
+Prerequisites: Python 3.11 or newer, Node.js with npm, and a modern browser. The checked dependency snapshot was produced by the tested Python 3.14.7 backend environment; use the range manifest and run the suite if using another supported interpreter.
 
 ### Backend
 
@@ -102,11 +102,11 @@ From the repository root in PowerShell:
 cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-lock.txt
 .\run-local.ps1
 ```
 
-The local launcher uses the absolute backend `.env` path and sets the exact Vite development origins for its process, avoiding stale inherited origin configuration. It is local-development-only; production must use an explicit deployment origin allowlist. Never replace an existing `.env` file as part of setup.
+The backend reads `DATABASE_URL` for the runtime role and `SKILLFAIR_MIGRATION_DATABASE_URL` for Alembic. Configure the first with the restricted application role and the second with the migration role; neither URL belongs in frontend configuration or version control. The local launcher uses the absolute backend `.env` path and sets the exact Vite development origins for its process, avoiding stale inherited origin configuration. It is local-development-only; production must use an explicit deployment origin allowlist. Never replace an existing `.env` file as part of setup. The API does not create tables at startup. Before applying a migration, verify the migration URL's host, port, and database, then review migration history and the target revision.
 
 ### Frontend
 
@@ -114,7 +114,7 @@ In a second terminal:
 
 ```powershell
 cd C:\SkillFair
-npm install
+npm ci
 npm run dev
 ```
 
@@ -138,12 +138,12 @@ npm run lint
 npm run build
 ```
 
-Frontend Node-based tests are available through `npm run test:session` (session persistence), `npm run test:review` (Recruiter Review logic), and `npm run test:impact` (Impact Measurement data and server-rendered disclosure checks). The impact UI check is not an interactive browser test. `npm run lint` and `npm run build` provide lint and production-build checks. No automated browser-test script is configured.
+Frontend Node-based tests are available through `npm run test:auth`, `npm run test:api-client`, `npm run test:identity`, `npm run test:session`, `npm run test:workflow-restoration`, `npm run test:workflow-history`, `npm run test:review`, and `npm run test:impact`. These exercise client/state logic and server-rendered UI states; they are not interactive React browser tests. `npm run lint` and `npm run build` provide lint and production-build checks. No automated browser-test script is configured. Backend tests use `python -m pytest -q tests` from `backend`; PostgreSQL integration is opt-in and must target only the dedicated test database.
 
 ## Prototype limitations and responsible use
 
 - **Identity assurance:** authentication, owner-scoped records, and durable workflow decisions are implemented. Account registration does not independently verify a person's real-world identity; a workflow review attests to the signed-in account only. Review notes are deliberately not persisted, and the review record is not an immutable production audit trail.
-- **Persistent data retention:** validated skill evidence, analyses, workflow snapshots, and review decisions persist in PostgreSQL without an automatic expiry. Account deletion and configurable retention/deletion workflows are not implemented. Original resume files and full extracted resume text are not stored.
+- **Persistent data retention:** validated skill evidence, analyses, workflow snapshots, and review decisions persist in PostgreSQL without automatic expiry. Account deletion and configurable retention/deletion workflows are not implemented. Recommended policy for a future approved deployment is 90 days for analyses/evidence and workflow/review records, with owner-requested account deletion removing the account's dependent records; this recommendation is not enforced. Feedback and baselines already have 90-day retention. Original resume files and full extracted resume text are not stored.
 - **Impact Measurement is prototype-level:** summaries are authenticated and scoped to one account, but are not organization-wide and do not independently verify a person's real-world identity. Recruiter ratings and baseline observations are reportable for up to 90 days; expired rows are not automatically purged. Candidate feedback persistence is deferred. Workflow review timestamps and decisions follow workflow-history retention and are not subject to the 90-day feedback window.
 - **No live market statistics:** no verified market-data provider is configured. The Market Intelligence endpoint reports unavailable rather than inventing data.
 - **No SAP integration:** no SAP connection, credentials, service permissions, or SAP-backed data has been configured or demonstrated. SAP remains future scope.
@@ -151,6 +151,18 @@ Frontend Node-based tests are available through `npm run test:session` (session 
 - **Evidence limits:** extracted excerpts and inferred skills require human interpretation. Missing evidence is not proof of missing ability. Exact skill-name matching is not semantic matching or a proficiency assessment.
 - **Resume processing:** uploads are not intentionally stored as permanent application files. Starlette's multipart parser uses a spooled temporary file with an approximately 1 MiB in-memory threshold; larger uploads may temporarily spill to the operating system's temporary directory. The endpoint closes upload files in its cleanup path on completion or endpoint-side failure, and Starlette handles cleanup if multipart parsing fails. Deployment operators should use a suitably permission-restricted temporary directory and review its cleanup and storage policies. The application does not claim that temporary storage is encrypted. The Skills Discovery response does not return full extracted resume text, and the provenance store does not store it; validated evidence excerpts may be returned and retained temporarily.
 - **Prototype security:** account authentication and ownership checks are present, but production protections still require review, including verified recruiter identity, account recovery, data-retention/deletion controls, security monitoring, and deployment-level safeguards.
+
+### Retention and deletion recommendations
+
+Current enforcement and recommendations are distinct. Recruiter feedback and baseline observations are limited to 90 days and lazily pruned on that account's next Impact request. Analyses/evidence, workflow inputs/snapshots, and review decisions currently have no automatic expiry or deletion workflow. Recommended future retention is 90 days for those records as well, subject to the data controller's approval. Sessions are time-limited but expired/revoked session rows do not have a scheduled purge. A future account-deletion operation should authenticate the owner, delete only that user's records in one transaction, rely on reviewed account-owned foreign-key cascades, and test every dependent table before enabling deletion. No automatic cleanup is enabled by this recommendation.
+
+### Deployment requirements
+
+`run-local.ps1` and Vite's development proxy are for local demonstrations only. A deployment must use HTTPS, exact HTTPS origins, Secure cookies, and a same-origin proxy or explicitly reviewed credentialed CORS. The API adds browser security headers to its responses; the service that hosts the React HTML must also set an appropriate CSP and security headers. A TLS-terminating proxy must provide HSTS and trusted-proxy handling; the backend intentionally does not trust forwarded-proto or forwarded-client-IP headers. Configure edge request-body limits, read/idle timeouts, and rate limiting. The app's body cap and rate limiter are bounded and process-local; they are not multi-worker or edge protections.
+
+### Dependency reproducibility and scanning
+
+`backend/requirements.txt` contains runtime dependency ranges; `backend/requirements-dev.txt` adds test dependencies. `backend/requirements-lock.txt` pins the combined development/test environment resolved for CPython 3.14.7. The frontend lockfile is `package-lock.json`; use `npm ci`. A recommended CI check is `pip-audit --no-deps -r backend/requirements-lock.txt` plus the organization's approved npm dependency audit; review findings before updating dependencies.
 
 SAP or another market-data provider may later connect through the market-data provider boundary after access, permissions, data provenance and source quality are established. That future integration must not be represented as available until it is actually connected and verified.
 

@@ -69,7 +69,13 @@ def _register(client: TestClient, email: str) -> None:
         json={"email": email, "password": PASSWORD},
         headers={"Origin": ORIGIN},
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
+    login = client.post(
+        "/api/auth/login",
+        json={"email": email, "password": PASSWORD},
+        headers={"Origin": ORIGIN},
+    )
+    assert login.status_code == 200, login.text
 
 
 def _csrf(client: TestClient) -> dict[str, str]:
@@ -125,6 +131,52 @@ def _create_workflow(client: TestClient, analysis_id: str) -> dict:
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_workflow_history_is_newest_first_account_scoped_and_includes_persisted_timestamps(app_client, monkeypatch):
+    client, engine = app_client
+    _register(client, "history-owner@example.test")
+    analysis = _create_analysis(client, monkeypatch, "history")
+    older = _create_workflow(client, analysis["analysis_id"])
+    newer = _create_workflow(client, analysis["analysis_id"])
+    older_created = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+    newer_created = datetime(2026, 1, 2, 10, 0, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        rows = session.scalars(select(CareerWorkflow).where(
+            CareerWorkflow.public_id.in_([older["run_id"], newer["run_id"]])
+        )).all()
+        for row in rows:
+            if row.public_id == older["run_id"]:
+                row.created_at = older_created
+                row.updated_at = older_created
+            else:
+                row.created_at = newer_created
+                row.updated_at = newer_created
+        session.commit()
+
+    response = client.get("/api/career/orchestrator/runs")
+    assert response.status_code == 200
+    history = response.json()
+    assert [item["run_id"] for item in history] == [newer["run_id"], older["run_id"]]
+    assert [item["job_title"] for item in history] == ["Data Analyst", "Data Analyst"]
+    assert history[0]["created_at"].startswith("2026-01-02T10:00:00")
+    assert history[0]["updated_at"].startswith("2026-01-02T10:00:00")
+    assert history[0]["workflow"]["workflow_status"] == "awaiting_human_review"
+    assert "owner_user_id" not in history[0]
+    assert "id" not in history[0]
+
+    other = TestClient(main.app)
+    _register(other, "history-empty@example.test")
+    empty = other.get("/api/career/orchestrator/runs")
+    assert empty.status_code == 200
+    assert empty.json() == []
+    other.close()
+
+    anonymous = TestClient(main.app)
+    unauthenticated = anonymous.get("/api/career/orchestrator/runs")
+    assert unauthenticated.status_code == 401
+    anonymous.close()
 
 
 def test_analysis_persists_validated_evidence_and_is_owner_scoped(app_client, monkeypatch):

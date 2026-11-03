@@ -25,6 +25,10 @@ class AuthenticatedUserResponse(BaseModel):
     created_at: datetime
 
 
+class AuthRegistrationResponse(BaseModel):
+    message: str = "Registration request processed. If the address already has an account, sign in. No verification email is sent."
+
+
 def _ensure_evidence_status(evidence_type: str, validation_status: str) -> None:
     expected_status = {
         "explicit": "evidence_found",
@@ -717,6 +721,8 @@ class CareerWorkflowListItem(BaseModel):
     geography: str | None = None
     essential_skills: list[str]
     preferred_skills: list[str]
+    created_at: datetime
+    updated_at: datetime
     workflow: CareerWorkflowRunResponse
 
 

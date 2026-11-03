@@ -1,0 +1,5 @@
+# Development and test dependencies. Runtime dependencies are shared with the
+# application manifest; the lockfile pins this complete test environment.
+-r requirements.txt
+
+pytest>=9.0.3,<9.1

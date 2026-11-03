@@ -272,3 +272,43 @@ class RequestBodyLimitMiddleware:
             if not disconnected:
                 response_rejected = True
                 await _send_json(send, 413, {"detail": "Request body exceeds the configured size limit."})
+
+
+class SecurityHeadersMiddleware:
+    """Add conservative browser security headers to application responses."""
+
+    _HEADERS = (
+        (b"x-content-type-options", b"nosniff"),
+        (b"x-frame-options", b"DENY"),
+        (b"referrer-policy", b"strict-origin-when-cross-origin"),
+        (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+        (b"content-security-policy", b"default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+    )
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def secure_send(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", []))
+                present = {key.lower() for key, _ in headers}
+                for name, value in self._HEADERS:
+                    # FastAPI's bundled Swagger/ReDoc documents load scripts and
+                    # styles; CSP belongs on API/documentless responses only.
+                    if name == b"content-security-policy" and scope.get("path") in {"/docs", "/redoc", "/docs/oauth2-redirect"}:
+                        continue
+                    if name not in present:
+                        headers.append((name, value))
+                # Do not trust forwarded-proto headers. A TLS-terminating proxy
+                # must set HSTS itself when the backend connection is HTTP.
+                if scope.get("scheme") == "https" and b"strict-transport-security" not in present:
+                    headers.append((b"strict-transport-security", b"max-age=15552000"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, secure_send)

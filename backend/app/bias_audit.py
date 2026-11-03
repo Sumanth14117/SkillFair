@@ -55,6 +55,18 @@ _YEARS_PATTERNS = (
     re.compile(r"(?P<years>\d{1,3})\s+years?['’]?\s+(?:of\s+)?(?:relevant\s+)?experience\b", re.IGNORECASE),
     re.compile(r"experience\s+(?:of\s+)?(?:(?:at\s+least|minimum(?:\s+of)?)\s+)?(?P<years>\d{1,3})\s*(?P<plus>\+)?\s*years?\b", re.IGNORECASE),
 )
+_CONTINUOUS_EXPERIENCE = re.compile(
+    r"\b(?:(?:minimum(?:\s+of)?|at\s+least)\s+)?\d{1,3}\s*\+?\s+years?\s+(?:of\s+)?"
+    r"(?:continuous|consecutive|uninterrupted)\s+(?:professional\s+)?experience\b",
+    re.IGNORECASE,
+)
+_EMPLOYMENT_CONTINUITY_RESTRICTIONS = (
+    re.compile(r"\bno\s+(?:(?:any)\s+)?(?:employment|work|career)\s+gaps?\b", re.IGNORECASE),
+    re.compile(r"\bno\s+(?:(?:any)\s+)?(?:career|employment|work)\s+breaks?\b", re.IGNORECASE),
+    re.compile(r"\b(?:uninterrupted|continuous|consecutive)\s+(?:professional\s+)?(?:employment|work)\s+history\b", re.IGNORECASE),
+    re.compile(r"\b(?:employment|work)\s+history\s+(?:must\s+be|is\s+required\s+to\s+be)\s+(?:uninterrupted|continuous|consecutive)\b", re.IGNORECASE),
+    re.compile(r"\b(?:gap[ -]?free)\s+(?:employment|work|career)\s+(?:history|record)\b", re.IGNORECASE),
+)
 _CLAUSE_BOUNDARY = re.compile(r"[;\n!?]|(?<=[.!?])\s+(?=[A-Z0-9])")
 
 
@@ -193,6 +205,31 @@ def audit_job(request: BiasAuditRequest) -> BiasAuditResponse:
                     explanation="This skill wording is broad and does not describe an observable behavior or proficiency level, which can lead reviewers to interpret it differently.",
                     suggestion="Describe the work behavior, deliverable, or proficiency level that would demonstrate this skill.",
                 ))
+
+        continuity_match = _CONTINUOUS_EXPERIENCE.search(text)
+        restrictive_match = next(
+            (match for pattern in _EMPLOYMENT_CONTINUITY_RESTRICTIONS if (match := pattern.search(text))),
+            None,
+        )
+        if continuity_match or restrictive_match:
+            match = continuity_match or restrictive_match
+            clause = _clause_for_span(text, match.start(), match.end())
+            add(_finding(
+                rule_id="BA-EXPERIENCE-CONTINUITY-001",
+                category="experience_threshold",
+                priority="medium",
+                phrase=clause,
+                importance=_importance_from_text(clause, importance),
+                explanation=(
+                    "A requirement for uninterrupted experience or an employment history without gaps may disadvantage "
+                    "career-returning candidates even when they have the relevant skills. Review whether continuity is "
+                    "necessary for the actual work rather than treating breaks as a proxy for capability."
+                ),
+                suggestion=(
+                    "Evaluate the role-relevant skills, demonstrated experience, and ability to perform the work; remove "
+                    "the continuity restriction unless it is demonstrably necessary."
+                ),
+            ))
 
         for pattern in _YEARS_PATTERNS:
             for match in pattern.finditer(text):
