@@ -1,6 +1,6 @@
 # SkillFair Skills Discovery API
 
-Python 3.11+ is recommended. From this directory, create and activate a virtual environment. `requirements.txt` contains runtime dependencies only. Install the pinned development/test environment from `requirements-lock.txt` before running tests or starting local development:
+Python 3.14.7 is the tested development version for the pinned dependency lock. The runtime dependency ranges support Python 3.11+, but the lock should be regenerated and validated before using another interpreter. From this directory, create and activate a virtual environment. `requirements.txt` contains runtime dependencies only; `requirements-dev.txt` adds test dependencies. Install the pinned development/test environment from `requirements-lock.txt` for a reproducible local test setup:
 
 ```powershell
 python -m venv .venv
@@ -86,6 +86,35 @@ The local launcher and Vite proxy are for development only. Deploy behind HTTPS,
 ## Dependency lock and vulnerability review
 
 `requirements.txt` contains runtime dependency ranges only. `requirements-dev.txt` includes those runtime requirements plus test dependencies. `requirements-lock.txt` is the single pinned development/test environment, resolved and tested with CPython 3.14.7; it includes pytest 9.0.3 and AnyIO 4.15.1. To refresh it, create a clean CPython 3.14.7 virtual environment, install `requirements-dev.txt`, capture the resolved package pins with `python -m pip freeze` (excluding the environment's bootstrap tools), and review the full diff before replacing the lock. Then verify the pins with `python -m pip check` and rerun the backend suite. Regenerate and rerun tests for another interpreter/platform. The frontend uses `package-lock.json` and should be installed with `npm ci`. CI should run an approved scanner, for example `pip-audit --no-deps -r requirements-lock.txt`, and review findings before changing versions.
+
+## Project quality checks and CI
+
+From the repository root, install the frontend exactly from `package-lock.json` and run the configured checks:
+
+```powershell
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+From this backend directory, install the pinned test environment and run syntax/import validation, focused security tests, and the full default suite:
+
+```powershell
+python -m pip install -r requirements-lock.txt
+python -m compileall -q app tests
+python -c "import app.main"
+python -m pytest -q tests/test_auth.py tests/test_error_handlers.py tests/test_protections.py tests/test_security_headers.py
+python -m pytest -q tests --ignore=tests/test_postgres_persistence_integration.py
+python -m pytest -q tests
+```
+
+The focused security command runs authentication and API security cases. The next command runs database-independent backend tests while excluding the PostgreSQL integration module. The full default backend suite includes that module, which skips unless `SKILLFAIR_RUN_POSTGRES_INTEGRATION=1` is explicitly enabled. That opt-in test harness loads the ignored `.env.test.local`, validates the exact dedicated test database and runtime role, and verifies server identity before test records are created. CI explicitly sets `SKILLFAIR_RUN_POSTGRES_INTEGRATION=0`. It has no external PostgreSQL service or connection URL and performs no migrations; other tests may use isolated in-memory SQLite. Do not set the opt-in flag in CI or point integration tests at development, production, or Permission-Aware RAG databases. Integration tests are a separate, explicitly approved operation.
+
+GitHub Actions is configured in `.github/workflows/ci.yml`. It uses Node.js 22 and CPython 3.14.7, installs the frontend with `npm ci` and backend dependencies from the pinned test lock, then runs frontend typecheck/lint/tests/build and backend syntax/import, focused security, and default test checks. CI sets PostgreSQL integration to `0`, has no external PostgreSQL service or connection URL, and performs no migrations or deployments; tests may use in-memory SQLite. Each job has a bounded runtime and pytest commands have individual timeouts. The workflow does not publish deployment artifacts.
+
+Environment files, `.envrc`, `.npmrc`, secrets directories, local backup/database files, backend upload and package directories, and generated test artifacts are excluded from Vercel deployment uploads by the repository's `.vercelignore`. This is separate from `.gitignore`: Git exclusions affect what Git reports or stages, while `.vercelignore` controls files excluded from Vercel deployment packaging. The existing `backups/` directory is preserved. A `.vercelignore` file does not mean Vercel deployment is fully configured; no complete Vercel build, runtime, environment, or database deployment setup is claimed.
 
 Minimum-sample suppression remains five eligible submissions/starts. `awaiting_data`, `insufficient_sample`, `measured`, and `unavailable` remain distinct; absent data is not shown as measured zero. Candidate feedback metrics are explicitly `unavailable`, not zero. The authenticated account association is not independent real-world identity verification. No resume text, evidence excerpts, comments, or individual records are included in measurement responses. These prototype metrics do not prove fairness, causation, candidate competence, or improved hiring outcomes. No actual pilot observations are available by default.
 

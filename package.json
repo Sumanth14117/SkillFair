@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc -b --pretty false",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node --experimental-strip-types --test --test-concurrency=1 tests/auth-client.test.mjs tests/api-client.test.mjs tests/auth-session-isolation.test.mjs tests/auth-tab-sync.test.mjs tests/session-persistence.test.mjs tests/workflow-restoration.test.mjs tests/workflow-history.test.mjs tests/recruiter-review.test.mjs tests/impact-measurement.test.mjs tests/impact-measurement-ui.test.mjs",
     "test:review": "node --test tests/recruiter-review.test.mjs",
     "test:auth": "node --experimental-strip-types --test tests/auth-client.test.mjs",
     "test:api-client": "node --experimental-strip-types --test tests/api-client.test.mjs",

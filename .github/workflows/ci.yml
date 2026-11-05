@@ -1,0 +1,67 @@
+name: SkillFair CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Run frontend tests
+        run: npm test
+      - name: Build production frontend
+        run: npm run build
+
+  backend:
+    name: Backend quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.14.7
+          cache: pip
+          cache-dependency-path: backend/requirements-lock.txt
+      - name: Install pinned dependencies
+        run: python -m pip install -r backend/requirements-lock.txt
+      - name: Check dependency consistency
+        run: python -m pip check
+      - name: Validate Python syntax and imports
+        working-directory: backend
+        run: |
+          python -m compileall -q app tests
+          python -c "import app.main"
+      - name: Run focused backend security tests
+        working-directory: backend
+        run: timeout --signal=TERM --kill-after=30s 8m python -m pytest -q tests/test_auth.py tests/test_error_handlers.py tests/test_protections.py tests/test_security_headers.py
+      - name: Run backend default suite
+        working-directory: backend
+        env:
+          SKILLFAIR_RUN_POSTGRES_INTEGRATION: "0"
+        run: timeout --signal=TERM --kill-after=30s 8m python -m pytest -q tests

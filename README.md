@@ -15,7 +15,7 @@ Traditional screening can over-rely on career history, credentials, and resume k
 - Persistence: SQLAlchemy 2.x, PostgreSQL/psycopg and Alembic; revision `202610310001` has been applied to the local SkillFair database. Registered account-owned analysis, workflow, review, and impact routes use PostgreSQL. In-memory stores remain only for isolated domain/test adapters.
 - Resume extraction: PDF and DOCX text extraction with temporary multipart spooling as needed; uploads are not intentionally retained as permanent application files.
 - Optional Skills Discovery providers: Google Gemini or Groq, configured only on the backend. Local deterministic analysis remains the default.
-- Backend tests: pytest. Frontend checks: ESLint and TypeScript/Vite production build.
+- Backend tests: pytest. Frontend checks: TypeScript type checking, ESLint, Node-based frontend tests, and the Vite production build.
 
 ## Implemented capabilities
 
@@ -92,7 +92,7 @@ Request and response field definitions are maintained in `backend/app/models.py`
 
 ## Local setup
 
-Prerequisites: Python 3.11 or newer, Node.js with npm, and a modern browser. The checked dependency snapshot was produced by the tested Python 3.14.7 backend environment; use the range manifest and run the suite if using another supported interpreter.
+Prerequisites: Python 3.14.7 (the version used to resolve and test the backend dependency lock), Node.js 22 with npm, and a modern browser. The backend runtime dependency ranges support Python 3.11+, but the pinned test lock is validated on Python 3.14.7; regenerate and validate the lock separately before using another Python version.
 
 ### Backend
 
@@ -130,15 +130,32 @@ The repository ignores `.env` files and resume documents. Do not commit real res
 
 ## Validation
 
-From the repository root:
+Install dependencies first: run `npm ci` from the repository root and `python -m pip install -r requirements-lock.txt` from `backend` (or follow the backend setup above). The range-based `requirements-dev.txt` is available for local dependency resolution; CI uses the pinned lock. Then run the backend checks from `backend`, followed by the frontend checks from the repository root.
+
+Backend checks:
 
 ```powershell
-py -m pytest -q backend\tests
+python -m compileall -q app tests
+python -c "import app.main"
+python -m pytest -q tests/test_auth.py tests/test_error_handlers.py tests/test_protections.py tests/test_security_headers.py
+python -m pytest -q tests --ignore=tests/test_postgres_persistence_integration.py
+python -m pytest -q tests
+```
+
+The individual frontend scripts (`test:auth`, `test:api-client`, `test:identity`, `test:session`, `test:workflow-restoration`, `test:workflow-history`, `test:review`, and `test:impact`) remain available for focused runs. These Node tests exercise client/state logic and server-rendered UI states; they are not interactive browser tests. No automated browser-test script is configured.
+
+Frontend checks, from the repository root:
+
+```powershell
+npm run typecheck
 npm run lint
+npm test
 npm run build
 ```
 
-Frontend Node-based tests are available through `npm run test:auth`, `npm run test:api-client`, `npm run test:identity`, `npm run test:session`, `npm run test:workflow-restoration`, `npm run test:workflow-history`, `npm run test:review`, and `npm run test:impact`. These exercise client/state logic and server-rendered UI states; they are not interactive React browser tests. `npm run lint` and `npm run build` provide lint and production-build checks. No automated browser-test script is configured. Backend tests use `python -m pytest -q tests` from `backend`; PostgreSQL integration is opt-in and must target only the dedicated test database.
+The focused backend command runs authentication and API security tests; the following command runs database-independent tests without the PostgreSQL integration module. The final command runs the full default suite, whose integration module is disabled unless `SKILLFAIR_RUN_POSTGRES_INTEGRATION=1` is explicitly set. CI explicitly sets `SKILLFAIR_RUN_POSTGRES_INTEGRATION=0`. CI does not configure an external PostgreSQL URL or service, and does not run migrations; tests may use isolated in-memory SQLite. To run PostgreSQL integration locally, follow the test module's safety guard and use only the separately provisioned dedicated SkillFair test database; its configuration must identify the approved host, port, database and runtime role before any test writes. Never point this suite at development, production, or Permission-Aware RAG databases. PostgreSQL integration should be invoked separately from the default checks only after that target is explicitly verified.
+
+GitHub Actions CI runs on pushes and pull requests. It installs npm dependencies with `npm ci`, installs the pinned backend test environment, performs Python syntax/import checks, runs focused backend security tests and the full default backend suite, and runs frontend type checking, lint, tests and production build. CI sets PostgreSQL integration to `0`, has no external PostgreSQL service or connection URL, and performs no migrations, deployments, or artifact publishing. Its tests may use isolated SQLite. Local backup and database artifacts are ignored by Git; the frontend build emits Vite application assets and is not a database or backup packaging step.
 
 ## Prototype limitations and responsible use
 
