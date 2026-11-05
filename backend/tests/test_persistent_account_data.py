@@ -54,7 +54,7 @@ def app_client(monkeypatch):
     monkeypatch.setenv("SKILLFAIR_AUTH_ALLOWED_ORIGINS", ORIGIN)
     monkeypatch.setenv("SKILLFAIR_AUTH_COOKIE_SECURE", "false")
     monkeypatch.setenv("SKILLFAIR_AUTH_RATE_LIMIT_PER_MINUTE", "1000")
-    with TestClient(main.app) as client:
+    with TestClient(main.app, client=(f"testclient-{uuid4().hex}", 50000)) as client:
         yield client, engine
     if previous is None:
         main.app.dependency_overrides.pop(database.get_db_session, None)
