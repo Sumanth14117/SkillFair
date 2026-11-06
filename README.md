@@ -177,6 +177,26 @@ Current enforcement and recommendations are distinct. Recruiter feedback and bas
 
 `run-local.ps1` and Vite's development proxy are for local demonstrations only. A deployment must use HTTPS, exact HTTPS origins, Secure cookies, and a same-origin proxy or explicitly reviewed credentialed CORS. The API adds browser security headers to its responses; the service that hosts the React HTML must also set an appropriate CSP and security headers. A TLS-terminating proxy must provide HSTS and trusted-proxy handling; the backend intentionally does not trust forwarded-proto or forwarded-client-IP headers. Configure edge request-body limits, read/idle timeouts, and rate limiting. The app's body cap and rate limiter are bounded and process-local; they are not multi-worker or edge protections.
 
+### Controlled portfolio/demo deployment (not production)
+
+The repository includes starter configuration for a controlled, non-commercial portfolio demonstration: Vercel Hobby serves the React frontend, same-origin `/api/*` requests are rewritten to a Render Free FastAPI service in Singapore, and the API uses a Neon PostgreSQL database in Singapore. The AI provider is disabled initially. This setup is not production hosting and is not intended for commercial or sensitive workloads.
+
+Before deployment, replace `YOUR-RENDER-SERVICE` in the destination in [`vercel.json`](vercel.json) with the actual Render service hostname. Keep the `/api/:path*` path mapping. The Render service is configured in [`render.yaml`](render.yaml); its start command uses the FastAPI `app` exported by `app.main`.
+
+Set these values in the Render service dashboard, without adding credentials to this repository:
+
+- `PYTHON_VERSION`: `3.14.7`.
+- `SKILLFAIR_AUTH_COOKIE_SECURE`: `true`.
+- `SKILLFAIR_LLM_PROVIDER`: `none`.
+- `SKILLFAIR_AUTH_ALLOWED_ORIGINS`: exact HTTPS frontend origin(s), including the deployed Vercel origin. Use comma-separated exact origins supported by the backend; do not use a wildcard.
+- `DATABASE_URL`: the Neon pooled connection URL for the runtime role. Keep this value secret and do not place it in Vercel frontend variables.
+
+Do not set `SKILLFAIR_MIGRATION_DATABASE_URL` on the Render service. For a future schema change, run Alembic from a trusted local machine or controlled CI job using a separately supplied Neon direct connection URL for the migration role. Verify its host and database before running a migration. The runtime uses the pooled URL; migration tooling should use the direct URL. No migration is run by Render startup or this deployment configuration.
+
+After configuration, verify `GET /api/health` through the deployed same-origin `/api` route. Check `GET /api/health/database` for database reachability, then perform an authentication smoke test: unauthenticated `GET /api/auth/me` should return 401, followed by registration/login and logout using a dedicated demo account to verify cookies, CSRF handling, and session restoration. Do not use real candidate data.
+
+Render Free services can spin down after 15 minutes without traffic and may take about a minute to wake. Their filesystem is ephemeral and the service may restart; do not rely on local files for persistence. Free-tier resource and availability limits make this suitable only for a controlled demo, not production. [Render documents these free-service limits](https://render.com/docs/free). Vercel's rewrite sends browser requests through the frontend origin; the `/api/*` responses are marked `Cache-Control: no-store` and rewrite caching is explicitly disabled. See [Vercel rewrite documentation](https://vercel.com/docs/routing/rewrites) and [cache-control guidance](https://vercel.com/docs/caching/cache-control-headers).
+
 ### Dependency reproducibility and scanning
 
 `backend/requirements.txt` contains runtime dependency ranges; `backend/requirements-dev.txt` adds test dependencies. `backend/requirements-lock.txt` pins the combined development/test environment resolved for CPython 3.14.7. The frontend lockfile is `package-lock.json`; use `npm ci`. A recommended CI check is `pip-audit --no-deps -r backend/requirements-lock.txt` plus the organization's approved npm dependency audit; review findings before updating dependencies.

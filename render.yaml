@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: skillfair-api
+    runtime: python
+    plan: free
+    region: singapore
+    branch: codex/skillfair-m4.4-checkpoint
+    rootDir: backend
+    buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements-lock.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.14.7"
+      - key: SKILLFAIR_AUTH_COOKIE_SECURE
+        value: "true"
+      - key: SKILLFAIR_LLM_PROVIDER
+        value: "none"
+      - key: SKILLFAIR_AUTH_ALLOWED_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
