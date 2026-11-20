@@ -5,10 +5,7 @@ export type WorkflowHistoryStatus = 'awaiting_human_review' | 'revise_required' 
 export type WorkflowHistoryItem = {
   run_id: string
   job_title: string
-  job_description: string
-  geography: string | null
-  essential_skills: string[]
-  preferred_skills: string[]
+  review_decision: 'proceed' | 'revise' | 'stop' | null
   created_at: string
   updated_at: string
   workflow_status: WorkflowHistoryStatus
@@ -28,24 +25,16 @@ function validDate(value: unknown): value is string {
 function parseHistoryItem(value: unknown): WorkflowHistoryItem | null {
   if (!value || typeof value !== 'object') return null
   const item = value as Record<string, unknown>
-  const workflow = item.workflow
-  if (!workflow || typeof workflow !== 'object') return null
-  const status = (workflow as Record<string, unknown>).workflow_status
+  const status = item.workflow_status
   if (!isValidSessionLocator(item.run_id)
     || typeof item.job_title !== 'string'
-    || typeof item.job_description !== 'string'
-    || (item.geography !== null && typeof item.geography !== 'string')
-    || !Array.isArray(item.essential_skills) || !item.essential_skills.every((skill) => typeof skill === 'string')
-    || !Array.isArray(item.preferred_skills) || !item.preferred_skills.every((skill) => typeof skill === 'string')
+    || (item.review_decision !== null && !['proceed', 'revise', 'stop'].includes(String(item.review_decision)))
     || !validDate(item.created_at) || !validDate(item.updated_at)
     || !['awaiting_human_review', 'revise_required', 'stopped', 'complete'].includes(String(status))) return null
   return {
     run_id: item.run_id,
     job_title: item.job_title,
-    job_description: item.job_description,
-    geography: item.geography,
-    essential_skills: item.essential_skills,
-    preferred_skills: item.preferred_skills,
+    review_decision: item.review_decision as WorkflowHistoryItem['review_decision'],
     created_at: item.created_at,
     updated_at: item.updated_at,
     workflow_status: status as WorkflowHistoryStatus,

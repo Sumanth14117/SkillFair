@@ -68,8 +68,32 @@ test('aborted authentication requests receive a safe timeout message', async () 
   abortError.name = 'AbortError'
   await assert.rejects(
     getCurrentUser(async () => { throw abortError }),
-    (error) => error instanceof AuthApiError && error.status === 0 && error.message === 'The authentication request timed out. Please try again.',
+    (error) => error instanceof AuthApiError && error.status === 0 && error.message.includes('may be waking from idle') && error.message.includes('not automatically retried'),
   )
+})
+
+test('a timed-out registration is not automatically retried and explains cold-start recovery', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  let timeoutCallback
+  let calls = 0
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay === 90_000) { timeoutCallback = callback; return 71 }
+    return realSetTimeout(callback, delay, ...args)
+  }
+  globalThis.clearTimeout = (id) => id === 71 ? undefined : realClearTimeout(id)
+  try {
+    const pending = registerAccount('recruiter@example.test', 'sample-safe-password', async (_url, options) => {
+      calls += 1
+      return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }))
+    })
+    timeoutCallback()
+    await assert.rejects(pending, (error) => error instanceof AuthApiError && error.message.includes('may be waking from idle'))
+    assert.equal(calls, 1)
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
 })
 
 test('registration posts credentials without storing or returning session tokens', async () => {

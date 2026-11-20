@@ -360,3 +360,8 @@ def test_rate_limit_policy_uses_specific_buckets_for_discovery_and_orchestrator(
     assert _request_group("/api/skills/discover/") == "discovery"
     assert _request_group("/api/career/orchestrator/runs/abc/review") == "orchestrator"
     assert _request_group("/api/auth/login") == "auth"
+    assert _request_group("/api/impact/feedback/candidate") == "feedback"
+    assert _request_group("/api/jobs/audits") == "feedback"
+    feedback_limiter = InMemoryRateLimiter(feedback_limit=1)
+    assert feedback_limiter.check("192.0.2.1", "feedback").allowed
+    assert not feedback_limiter.check("192.0.2.1", "feedback").allowed

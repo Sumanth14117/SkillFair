@@ -14,12 +14,16 @@ from app.db_models import (
     AnalysisSkill,
     Base,
     CandidateFeedback,
+    CandidateExperienceFeedback,
+    BiasAudit,
+    BiasAuditReviewSelection,
     CareerWorkflow,
     ImpactObservation,
     RecruiterFeedback,
     ResumeAnalysis,
     User,
     UserSession,
+    UserNotification,
     WorkflowReview,
 )
 
@@ -27,7 +31,8 @@ from app.db_models import (
 EXPECTED_TABLES = {
     "users", "user_sessions", "resume_analyses", "analysis_skills",
     "career_workflows", "workflow_reviews", "impact_observations",
-    "recruiter_feedback", "candidate_feedback",
+    "recruiter_feedback", "candidate_feedback", "candidate_experience_feedback",
+    "bias_audits", "bias_audit_review_selections", "user_notifications",
 }
 
 
@@ -63,6 +68,38 @@ def test_orm_metadata_contains_schema_and_owner_scoped_foreign_keys():
     assert ImpactObservation.__table__.c.numeric_value.nullable is False
     assert RecruiterFeedback.__table__.c.evidence_usefulness.nullable is False
     assert CandidateFeedback.__table__.c.overall_experience.nullable is False
+    assert CandidateExperienceFeedback.__table__.c.application_experience.nullable is False
+    assert CandidateExperienceFeedback.__table__.c.suggestion_categories.nullable is False
+    assert BiasAudit.__table__.c.result_snapshot.nullable is False
+    assert "job_description" not in BiasAudit.__table__.c
+    review_owner_constraints = [
+        constraint for constraint in BiasAuditReviewSelection.__table__.foreign_key_constraints
+        if len(constraint.elements) == 2
+    ]
+    assert any(
+        {element.parent.name for element in constraint.elements} == {"audit_id", "owner_user_id"}
+        for constraint in review_owner_constraints
+    )
+    notification_owner_constraints = [
+        constraint for constraint in UserNotification.__table__.foreign_key_constraints
+        if len(constraint.elements) == 2
+    ]
+    assert any(
+        {element.parent.name for element in constraint.elements} == {"workflow_id", "owner_user_id"}
+        for constraint in notification_owner_constraints
+    )
+    assert any(
+        {column.name for column in constraint.columns} == {"owner_user_id", "source_event_key"}
+        for constraint in UserNotification.__table__.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    )
+
+
+def test_candidate_experience_suggestion_categories_server_default_matches_migration():
+    # Migration 202611190001 defines the database default as the JSON literal [].
+    column = CandidateExperienceFeedback.__table__.c.suggestion_categories
+    assert column.server_default is not None
+    assert str(column.server_default.arg) == "'[]'"
 
 
 def test_sqlite_metadata_enforces_analysis_skill_ownership(sqlite_engine: Engine):

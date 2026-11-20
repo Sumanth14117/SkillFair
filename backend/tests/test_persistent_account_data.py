@@ -133,7 +133,7 @@ def _create_workflow(client: TestClient, analysis_id: str) -> dict:
     return response.json()
 
 
-def test_workflow_history_is_newest_first_account_scoped_and_includes_persisted_timestamps(app_client, monkeypatch):
+def test_workflow_history_is_newest_first_account_scoped_and_returns_minimal_summaries(app_client, monkeypatch):
     client, engine = app_client
     _register(client, "history-owner@example.test")
     analysis = _create_analysis(client, monkeypatch, "history")
@@ -155,16 +155,23 @@ def test_workflow_history_is_newest_first_account_scoped_and_includes_persisted_
                 row.updated_at = newer_created
         session.commit()
 
-    response = client.get("/api/career/orchestrator/runs")
+    response = client.get("/api/career/orchestrator/runs?limit=2")
     assert response.status_code == 200
     history = response.json()
     assert [item["run_id"] for item in history] == [newer["run_id"], older["run_id"]]
     assert [item["job_title"] for item in history] == ["Data Analyst", "Data Analyst"]
     assert history[0]["created_at"].startswith("2026-01-02T10:00:00")
     assert history[0]["updated_at"].startswith("2026-01-02T10:00:00")
-    assert history[0]["workflow"]["workflow_status"] == "awaiting_human_review"
+    assert history[0]["workflow_status"] == "awaiting_human_review"
+    assert history[0]["review_decision"] is None
+    assert set(history[0]) == {"run_id", "job_title", "workflow_status", "review_decision", "created_at", "updated_at"}
+    assert "job_description" not in history[0]
+    assert "essential_skills" not in history[0]
+    assert "workflow" not in history[0]
     assert "owner_user_id" not in history[0]
     assert "id" not in history[0]
+    limited = client.get("/api/career/orchestrator/runs?limit=1")
+    assert [item["run_id"] for item in limited.json()] == [newer["run_id"]]
 
     other = TestClient(main.app)
     _register(other, "history-empty@example.test")
@@ -244,10 +251,15 @@ def test_workflow_review_survives_fresh_sessions_and_is_owner_scoped(app_client,
     fetched = client.get(f"/api/career/orchestrator/runs/{run_id}")
     assert fetched.status_code == 200
     assert fetched.json()["human_review"]["status"] == "pending"
+    assert fetched.json()["workflow_inputs"]["job_description"] == "Use Python to create clear operational reports."
+    assert fetched.json()["workflow_inputs"]["essential_skills"] == ["Python"]
     listed = client.get("/api/career/orchestrator/runs")
     assert listed.status_code == 200
-    assert listed.json()[0]["workflow"]["run_id"] == run_id
+    assert listed.json()[0]["run_id"] == run_id
     assert listed.json()[0]["job_title"] == "Data Analyst"
+    assert listed.json()[0]["review_decision"] is None
+    assert "workflow" not in listed.json()[0]
+    assert "job_description" not in listed.json()[0]
 
     started = client.post(f"/api/impact/reviews/{run_id}/start", headers=_csrf(client))
     assert started.status_code == 200
@@ -260,6 +272,10 @@ def test_workflow_review_survives_fresh_sessions_and_is_owner_scoped(app_client,
     assert proceeded.status_code == 200, proceeded.text
     assert proceeded.json()["workflow_status"] == "complete"
     assert proceeded.json()["learning_pathways"]["status"] == "complete"
+    listed_after_review = client.get("/api/career/orchestrator/runs")
+    assert listed_after_review.status_code == 200
+    assert listed_after_review.json()[0]["review_decision"] == "proceed"
+    assert listed_after_review.json()[0]["workflow_status"] == "complete"
 
     restored = client.get(f"/api/career/orchestrator/runs/{run_id}")
     assert restored.status_code == 200
@@ -267,6 +283,9 @@ def test_workflow_review_survives_fresh_sessions_and_is_owner_scoped(app_client,
     assert restored.json()["human_review"]["reviewed_requirement_ids"] == requirement_ids
     assert restored.json()["human_review"]["review_notes"] is None
     assert restored.json()["learning_pathways"]["result"] is not None
+    completed_summary = client.get("/api/career/orchestrator/runs").json()[0]
+    assert completed_summary["review_decision"] == "proceed"
+    assert completed_summary["workflow_status"] == "complete"
 
     with Session(engine) as session:
         row = session.scalar(select(CareerWorkflow).where(CareerWorkflow.public_id == run_id))
@@ -329,3 +348,99 @@ def test_persisted_revise_and_stop_never_create_learning_pathways(app_client, mo
     assert restored.status_code == 200
     assert restored.json()["human_review"]["decision"] == decision
     assert restored.json()["learning_pathways"]["result"] is None
+
+
+def test_saved_bias_audit_restores_across_login_and_is_owner_scoped(app_client):
+    client, _engine = app_client
+    unauthenticated_list = client.get("/api/jobs/audits")
+    assert unauthenticated_list.status_code == 401
+    unauthenticated_save = client.post("/api/jobs/audits", headers={"Origin": ORIGIN}, json={
+        "job_description": "Minimum 8 years of continuous professional experience.",
+        "requirements": [],
+    })
+    assert unauthenticated_save.status_code == 401
+    _register(client, "bias-persist-owner@example.test")
+    request = {
+        "job_title": "Data Analyst",
+        "job_description": "Minimum 8 years of continuous professional experience.",
+        "requirements": [],
+    }
+    saved = client.post("/api/jobs/audits", headers=_csrf(client), json=request)
+    assert saved.status_code == 200, saved.text
+    audit = saved.json()
+    audit_id = audit["audit_id"]
+    assert audit["result"]["finding_count"] == 1
+    assert audit["review_selections"][0]["review_state"] == "needs_review"
+    assert "job_description" not in audit
+    assert "owner_user_id" not in audit
+    missing_csrf = client.post("/api/jobs/audits", headers={"Origin": ORIGIN}, json=request)
+    assert missing_csrf.status_code == 403
+
+    updated = client.patch(
+        f"/api/jobs/audits/{audit_id}/findings/0",
+        headers=_csrf(client), json={"review_state": "accepted"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["review_selections"][0]["review_state"] == "accepted"
+
+    csrf = client.cookies.get(CSRF_COOKIE_NAME)
+    logout = client.post("/api/auth/logout", headers={"Origin": ORIGIN, "X-CSRF-Token": csrf})
+    assert logout.status_code == 204
+    relogin = client.post("/api/auth/login", headers={"Origin": ORIGIN}, json={
+        "email": "bias-persist-owner@example.test", "password": PASSWORD,
+    })
+    assert relogin.status_code == 200
+    history = client.get("/api/jobs/audits")
+    assert history.status_code == 200 and history.json()["audits"][0]["audit_id"] == audit_id
+    restored = client.get(f"/api/jobs/audits/{audit_id}")
+    assert restored.status_code == 200
+    assert restored.json()["review_selections"][0]["review_state"] == "accepted"
+
+    other = TestClient(main.app, client=(f"testclient-{uuid4().hex}", 50000))
+    _register(other, "bias-persist-other@example.test")
+    assert other.get(f"/api/jobs/audits/{audit_id}").status_code == 404
+    denied_update = other.patch(
+        f"/api/jobs/audits/{audit_id}/findings/0",
+        headers=_csrf(other), json={"review_state": "dismissed"},
+    )
+    assert denied_update.status_code == 404
+    assert other.delete(f"/api/jobs/audits/{audit_id}", headers=_csrf(other)).status_code == 404
+    other.close()
+
+
+def test_candidate_feedback_requires_auth_and_csrf_and_is_idempotent_account_scoped(app_client):
+    client, _engine = app_client
+    payload = {
+        "submission_id": str(uuid4()), "consent_to_aggregate": True,
+        "application_experience": 4, "process_accessibility": 3,
+        "job_requirements_clarity": 5, "perceived_fairness": 2,
+        "suggestion_categories": ["clarity", "communication"],
+    }
+    unauthenticated = client.post("/api/impact/feedback/candidate", headers={"Origin": ORIGIN}, json=payload)
+    assert unauthenticated.status_code == 401
+    _register(client, "candidate-feedback-owner@example.test")
+    missing_csrf = client.post("/api/impact/feedback/candidate", headers={"Origin": ORIGIN}, json=payload)
+    assert missing_csrf.status_code == 403
+    first = client.post("/api/impact/feedback/candidate", headers=_csrf(client), json=payload)
+    duplicate = client.post("/api/impact/feedback/candidate", headers=_csrf(client), json=payload)
+    assert first.status_code == 200 and first.json()["duplicate"] is False
+    assert duplicate.status_code == 200 and duplicate.json()["duplicate"] is True
+    assert str(payload["submission_id"]) not in first.text
+    assert "linked to this signed-in account" in first.json()["message"]
+
+    summary = client.get("/api/impact/summary?category=candidate_feedback")
+    assert summary.status_code == 200
+    dimensions = {item["metric_id"]: item for item in summary.json()["metrics"]}
+    assert dimensions["candidate_application_experience"]["sample_size"] == 1
+    assert dimensions["candidate_application_experience"]["value"] is None
+    assert dimensions["candidate_application_experience"]["data_availability"] == "insufficient_sample"
+    assert str(payload["submission_id"]) not in summary.text
+
+    other = TestClient(main.app, client=(f"testclient-{uuid4().hex}", 50000))
+    _register(other, "candidate-feedback-other@example.test")
+    other_summary = other.get("/api/impact/summary?category=candidate_feedback")
+    assert other_summary.status_code == 200
+    other_metrics = {item["metric_id"]: item for item in other_summary.json()["metrics"]}
+    assert other_metrics["candidate_application_experience"]["sample_size"] == 0
+    assert other_metrics["candidate_application_experience"]["data_availability"] == "awaiting_data"
+    other.close()

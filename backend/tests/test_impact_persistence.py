@@ -100,7 +100,7 @@ def test_recruiter_feedback_and_baseline_are_persisted_and_owner_scoped(impact_d
         summary_b = get_account_impact_summary(db, owner_b.id, now=now + timedelta(seconds=2))
         assert next(m for m in summary_a.metrics if m.metric_id == "recruiter_evidence_usefulness").sample_size == 1
         assert next(m for m in summary_b.metrics if m.metric_id == "recruiter_evidence_usefulness").sample_size == 0
-        assert summary_a.candidate_rating_distribution[0].data_availability == "unavailable"
+        assert next(metric for metric in summary_a.metrics if metric.metric_id == "candidate_application_experience").data_availability == "awaiting_data"
         assert summary_a.retention_seconds == 90 * 24 * 60 * 60
         payload = summary_a.model_dump(mode="json")
         serialized = str(payload)
@@ -117,7 +117,7 @@ def test_persistent_summary_preserves_empty_and_measured_zero_semantics(impact_d
         durations = next(metric for metric in summary.metrics if metric.metric_id == "review_duration_average")
         assert durations.value is None and durations.sample_size == 0
         assert durations.data_availability == "awaiting_data"
-        assert next(metric for metric in summary.metrics if metric.metric_id == "candidate_experience_average").data_availability == "unavailable"
+        assert next(metric for metric in summary.metrics if metric.metric_id == "candidate_application_experience").data_availability == "awaiting_data"
         assert "fairness" in summary.disclaimer
 
 
@@ -332,7 +332,7 @@ def test_persistent_summary_preserves_date_and_category_filters(impact_db):
         assert selected.baseline_comparison.data_availability == "unavailable"
 
 
-def test_impact_routes_require_authentication_and_candidate_persistence_is_deferred():
+def test_impact_routes_require_authentication_and_candidate_feedback_is_available():
     expected_paths = {
         "/api/impact/summary", "/api/impact/feedback/recruiter",
         "/api/impact/feedback/candidate", "/api/impact/baseline-observations",

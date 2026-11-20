@@ -371,11 +371,11 @@ export default function CareerOrchestrator({ ownerId, analysisId, run, runId, on
       }
       onRunChange(result.run)
       onDraftChange({
-        jobTitle: item.job_title,
-        jobDescription: item.job_description,
-        geography: item.geography ?? '',
-        essentialSkills: item.essential_skills.join('\n'),
-        preferredSkills: item.preferred_skills.join('\n'),
+        jobTitle: result.workflowInputs.job_title,
+        jobDescription: result.workflowInputs.job_description,
+        geography: result.workflowInputs.geography ?? '',
+        essentialSkills: result.workflowInputs.essential_skills.join('\n'),
+        preferredSkills: result.workflowInputs.preferred_skills.join('\n'),
       })
       setSelected([])
       setReviewNotes('')

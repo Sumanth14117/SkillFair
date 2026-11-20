@@ -23,13 +23,10 @@ function listItem(runId, jobTitle, status = 'awaiting_human_review') {
   return {
     run_id: runId,
     job_title: jobTitle,
-    job_description: 'Use Python for reporting.',
-    geography: null,
-    essential_skills: ['Python'],
-    preferred_skills: ['SQL'],
+    workflow_status: status,
+    review_decision: status === 'complete' ? 'proceed' : null,
     created_at: createdAt,
     updated_at: createdAt,
-    workflow: { workflow_status: status },
   }
 }
 
@@ -46,6 +43,7 @@ function workflow(runId) {
     human_review: { status: 'pending', decision: null, reviewable_requirement_ids: [], reviewed_requirement_ids: [], review_notes: null, attested_at: null, reviewer_identity_verified: false },
     learning_pathways: { status: 'blocked_pending_review', message: 'Review required.', result: null },
     workflow_summary: 'Awaiting review.', disclaimers: [],
+    workflow_inputs: { job_title: 'Data Analyst', job_description: 'Use Python for reporting.', geography: null, essential_skills: ['Python'], preferred_skills: ['SQL'] },
   }
 }
 
@@ -75,6 +73,9 @@ test('history request uses authenticated list endpoint and preserves backend new
   assert.equal(result.status, 'ready')
   assert.deepEqual(result.items.map((item) => item.run_id), [newerRunId, olderRunId])
   assert.equal(result.items[1].workflow_status, 'complete')
+  assert.equal(result.items[1].review_decision, 'proceed')
+  assert.equal('job_description' in result.items[1], false)
+  assert.equal('workflow' in result.items[1], false)
 })
 
 test('empty and unavailable API responses become explicit states without fabricated records', async () => {
@@ -109,14 +110,16 @@ test('continuing a history entry restores its exact ID and never requests a late
   assert.deepEqual(calls, [`/api/career/orchestrator/runs/${olderRunId}`])
   assert.equal(result.kind, 'restored')
   assert.equal(result.run.run_id, olderRunId)
+  assert.equal(result.workflowInputs.job_description, 'Use Python for reporting.')
   assert.notEqual(result.run.run_id, newerRunId)
 })
 
 test('history card shows persisted workflow status, timestamps, ID, and continue action', () => {
-  const item = { ...listItem(olderRunId, 'Data Analyst', 'revise_required'), workflow_status: 'revise_required' }
+  const item = { ...listItem(olderRunId, 'Data Analyst', 'revise_required'), workflow_status: 'revise_required', review_decision: 'revise' }
   const html = render({ status: 'ready', items: [item] })
   assert.match(html, /Data Analyst/)
   assert.match(html, /Revised criteria needed/)
+  assert.match(html, /Human review decision · revise/)
   assert.match(html, /Created/)
   assert.match(html, new RegExp(olderRunId))
   assert.match(html, /Continue Workflow/)

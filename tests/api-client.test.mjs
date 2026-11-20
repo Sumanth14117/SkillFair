@@ -117,7 +117,7 @@ test('shared timeout still aborts when the caller also supplies a signal', async
   const realClearTimeout = globalThis.clearTimeout
   let timeoutCallback
   globalThis.setTimeout = (callback, delay, ...args) => {
-    if (delay === 20_000) { timeoutCallback = callback; return 81 }
+    if (delay === 90_000) { timeoutCallback = callback; return 81 }
     return realSetTimeout(callback, delay, ...args)
   }
   globalThis.clearTimeout = (id) => id === 81 ? undefined : realClearTimeout(id)
@@ -141,7 +141,7 @@ test('shared timeout remains active until a response body finishes', async () =>
   let timeoutCallback
   let cleared = 0
   globalThis.setTimeout = (callback, delay, ...args) => {
-    if (delay === 20_000) { timeoutCallback = callback; return 82 }
+    if (delay === 90_000) { timeoutCallback = callback; return 82 }
     return realSetTimeout(callback, delay, ...args)
   }
   globalThis.clearTimeout = (id) => {
@@ -157,6 +157,35 @@ test('shared timeout remains active until a response body finishes', async () =>
     timeoutCallback()
     await assert.rejects(body, (error) => error instanceof api.ApiRequestTimeoutError)
     assert.equal(cleared, 1)
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+})
+
+test('a timed-out state-changing API request is not automatically retried', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  let timeoutCallback
+  let calls = 0
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay === 90_000) { timeoutCallback = callback; return 83 }
+    return realSetTimeout(callback, delay, ...args)
+  }
+  globalThis.clearTimeout = (id) => id === 83 ? undefined : realClearTimeout(id)
+  globalThis.fetch = async (_input, init) => {
+    calls += 1
+    return new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }))
+  }
+  try {
+    const pending = api.skillFairFetch('/api/career/orchestrator/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': 'test-token' },
+      body: '{}',
+    })
+    timeoutCallback()
+    await assert.rejects(pending, (error) => error instanceof api.ApiRequestTimeoutError && error.message.includes('may be waking from idle'))
+    assert.equal(calls, 1)
   } finally {
     globalThis.setTimeout = realSetTimeout
     globalThis.clearTimeout = realClearTimeout

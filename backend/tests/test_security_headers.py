@@ -12,7 +12,15 @@ def test_http_api_responses_receive_security_headers_without_hsts():
     assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
     assert response.headers["content-security-policy"] == "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    assert response.headers["cache-control"] == "no-store"
     assert "strict-transport-security" not in response.headers
+
+
+def test_unauthenticated_account_api_response_is_not_cached():
+    with TestClient(app) as client:
+        response = client.get("/api/auth/me")
+    assert response.status_code == 401
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_https_responses_receive_hsts_but_forwarded_proto_is_not_trusted():

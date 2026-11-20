@@ -1,11 +1,11 @@
 import { csrfTokenFromCookie } from './authClient'
 import { currentSessionEpoch, notifySessionExpired, subscribeSessionEpoch } from './sessionExpiry'
 
-const API_TIMEOUT_MS = 20_000
+export const API_TIMEOUT_MS = 90_000
 
 export class ApiRequestTimeoutError extends Error {
   constructor() {
-    super('The request timed out. Please try again.')
+    super('SkillFair is taking longer to respond than expected and may be waking from idle. The request was not automatically retried; check whether an action completed before submitting it again.')
     this.name = 'ApiRequestTimeoutError'
   }
 }

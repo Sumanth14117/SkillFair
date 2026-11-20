@@ -27,6 +27,7 @@ function pendingWorkflow(runId) {
     human_review: { status: 'pending', decision: null, reviewable_requirement_ids: [], reviewed_requirement_ids: [], review_notes: null, attested_at: null, reviewer_identity_verified: false },
     learning_pathways: { status: 'blocked_pending_review', message: 'Review required.', result: null },
     workflow_summary: 'Awaiting review.', disclaimers: [],
+    workflow_inputs: { job_title: 'Analyst', job_description: 'Role details.', geography: null, essential_skills: ['Python'], preferred_skills: [] },
   }
 }
 
@@ -39,6 +40,7 @@ test('refresh restoration retrieves the saved older workflow by its exact ID', a
   assert.deepEqual(calls, [`/api/career/orchestrator/runs/${olderRunId}`])
   assert.equal(result.kind, 'restored')
   assert.equal(result.run.run_id, olderRunId)
+  assert.deepEqual(result.workflowInputs.essential_skills, ['Python'])
   assert.notEqual(result.run.run_id, newerRunId)
 })
 

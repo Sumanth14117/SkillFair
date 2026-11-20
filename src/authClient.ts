@@ -25,7 +25,8 @@ const SAFE_MESSAGES: Record<number, string> = {
   409: 'Unable to create the account. Check the details or sign in.',
   429: 'Too many authentication attempts. Wait a moment and try again.',
 }
-const AUTH_REQUEST_TIMEOUT_MS = 12_000
+const AUTH_REQUEST_TIMEOUT_MS = 90_000
+const REQUEST_TIMEOUT_MESSAGE = 'SkillFair is taking longer to respond than expected and may be waking from idle. The request was not automatically retried; check whether an action completed before submitting it again.'
 const SAFE_BACKEND_DETAILS = new Set([
   'Invalid email or password.',
   'Unable to create account. Check the details or sign in.',
@@ -63,7 +64,7 @@ async function requestWithTimeout<T>(
     return await consume(response)
   } catch (error) {
     if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
-      throw new AuthApiError('The authentication request timed out. Please try again.', 0)
+      throw new AuthApiError(REQUEST_TIMEOUT_MESSAGE, 0)
     }
     if (error instanceof AuthApiError) throw error
     throw new AuthApiError('Could not reach SkillFair. Check your connection and try again.', 0)

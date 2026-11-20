@@ -21,7 +21,9 @@ from .models import (
     CareerHumanReviewRequest,
     CareerHumanReviewState,
     CareerLearningStage,
-    CareerWorkflowListItem,
+    CareerWorkflowDetailResponse,
+    CareerWorkflowInputs,
+    CareerWorkflowSummary,
     CareerWorkflowRunResponse,
     CareerWorkflowStage,
     BiasAuditResponse,
@@ -232,35 +234,46 @@ def persist_workflow(
     return response
 
 
-def get_workflow(db: Session, owner_user_id: UUID, public_id: str) -> CareerWorkflowRunResponse | None:
+def get_workflow(db: Session, owner_user_id: UUID, public_id: str) -> CareerWorkflowDetailResponse | None:
     row = db.scalar(select(CareerWorkflow).where(
         CareerWorkflow.public_id == public_id,
         CareerWorkflow.owner_user_id == owner_user_id,
         (CareerWorkflow.expires_at.is_(None)) | (CareerWorkflow.expires_at > _now()),
     ))
-    return workflow_response(db, row) if row is not None else None
-
-
-def list_workflows(db: Session, owner_user_id: UUID, limit: int = 30) -> list[CareerWorkflowListItem]:
-    rows = db.scalars(select(CareerWorkflow).where(
-        CareerWorkflow.owner_user_id == owner_user_id,
-        (CareerWorkflow.expires_at.is_(None)) | (CareerWorkflow.expires_at > _now()),
-    ).order_by(CareerWorkflow.created_at.desc(), CareerWorkflow.id.desc()).limit(limit)).all()
-    items = []
-    for row in rows:
-        response = workflow_response(db, row)
-        items.append(CareerWorkflowListItem(
-            run_id=row.public_id,
+    if row is None:
+        return None
+    response = workflow_response(db, row)
+    return CareerWorkflowDetailResponse(
+        **response.model_dump(),
+        workflow_inputs=CareerWorkflowInputs(
             job_title=row.job_title,
             job_description=row.job_description,
             geography=row.geography,
             essential_skills=list(row.essential_skills),
             preferred_skills=list(row.preferred_skills),
+        ),
+    )
+
+
+def list_workflows(db: Session, owner_user_id: UUID, limit: int = 30) -> list[CareerWorkflowSummary]:
+    rows = db.scalars(select(CareerWorkflow).where(
+        CareerWorkflow.owner_user_id == owner_user_id,
+        (CareerWorkflow.expires_at.is_(None)) | (CareerWorkflow.expires_at > _now()),
+    ).order_by(CareerWorkflow.created_at.desc(), CareerWorkflow.id.desc()).limit(limit)).all()
+    if not rows:
+        return []
+    review_decisions = dict(db.execute(select(WorkflowReview.workflow_id, WorkflowReview.decision).where(
+        WorkflowReview.owner_user_id == owner_user_id,
+        WorkflowReview.workflow_id.in_([row.id for row in rows]),
+    )).all())
+    return [CareerWorkflowSummary(
+            run_id=row.public_id,
+            job_title=row.job_title,
+            workflow_status=row.workflow_status,
+            review_decision=review_decisions.get(row.id),
             created_at=row.created_at,
             updated_at=row.updated_at,
-            workflow=response,
-        ))
-    return items
+        ) for row in rows]
 
 
 def record_workflow_review_start(db: Session, owner_user_id: UUID, public_id: str, at: datetime | None = None) -> bool | None:
@@ -352,6 +365,20 @@ def apply_workflow_review(
     row.version += 1
     row.updated_at = reviewed_at
     db.flush()
+    from .navigation import add_workflow_notifications
+
+    add_workflow_notifications(
+        db,
+        owner_id=owner_user_id,
+        workflow=row,
+        decision=request.decision,
+        created_at=reviewed_at,
+        pathways_ready=(
+            request.decision == "proceed"
+            and updated.learning_pathways.status == "complete"
+            and updated.learning_pathways.result is not None
+        ),
+    )
     # Review notes remain intentionally transient and are not echoed by the
     # persistent API, keeping repeated decisions response-idempotent.
     db.commit()

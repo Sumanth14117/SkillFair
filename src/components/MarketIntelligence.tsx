@@ -1,82 +1,15 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertCircle, BarChart3, CalendarDays, Database, Globe2, LoaderCircle, MapPin, ShieldCheck, Sparkles } from 'lucide-react'
+import { fetchMarketIntelligence, fetchProviderStatus, type MarketDataSource, type MarketErrorKind, type MarketInsight, type MarketIntelligenceResult, type MarketProviderStatus } from '../marketIntelligenceClient'
 import '../styles/market-intelligence.css'
 
-type MarketDataSource = {
-  source_id: string
-  source_name: string
-  source_type: string
-  verification_status: 'verified'
-  retrieved_at: string
-  published_at: string | null
-  geography: string | null
-  source_reference: string
-}
-type MarketInsight = {
-  insight_id: string
-  category: string
-  title: string
-  summary: string
-  value: number | null
-  unit: string | null
-  period: string | null
-  geography: string | null
-  source_id: string
-}
-type MarketIntelligenceResult = {
-  job_title: string
-  geography: string | null
-  data_availability: 'available' | 'unavailable'
-  sources: MarketDataSource[]
-  insights: MarketInsight[]
-  message: string
-}
-type ErrorKind = 'validation' | 'network' | 'service'
+type ErrorKind = MarketErrorKind
 
 function formatTimestamp(value: string): string {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat(undefined, {
     year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
   }).format(parsed)
-}
-
-function getValidationMessage(detail: unknown): string {
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail)) {
-    return detail.map((item) => item && typeof item === 'object' && 'msg' in item && typeof item.msg === 'string' ? item.msg : '')
-      .filter(Boolean).join(' ')
-  }
-  return ''
-}
-
-async function fetchMarketIntelligence(payload: { job_title: string; geography?: string }): Promise<MarketIntelligenceResult> {
-  let response: Response
-  try {
-    response = await fetch('/api/market/intelligence', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-  } catch {
-    throw Object.assign(new Error('Could not reach Market Intelligence. Check that the backend is running and try again.'), { kind: 'network' as ErrorKind })
-  }
-
-  let body: Partial<MarketIntelligenceResult> & { detail?: unknown }
-  try {
-    body = await response.json() as typeof body
-  } catch {
-    throw Object.assign(new Error('The service returned an unreadable response. Please try again.'), { kind: 'service' as ErrorKind })
-  }
-  if (!response.ok) {
-    const detail = getValidationMessage(body.detail)
-    throw Object.assign(new Error(detail || 'Market Intelligence could not be loaded. Please try again.'), {
-      kind: response.status === 422 ? 'validation' as ErrorKind : 'service' as ErrorKind,
-    })
-  }
-  if (typeof body.job_title !== 'string' || !['available', 'unavailable'].includes(body.data_availability ?? '') || !Array.isArray(body.sources) || !Array.isArray(body.insights) || typeof body.message !== 'string') {
-    throw Object.assign(new Error('The service returned an unsupported response. Please try again.'), { kind: 'service' as ErrorKind })
-  }
-  return body as MarketIntelligenceResult
 }
 
 function MarketSource({ source }: { source: MarketDataSource }) {
@@ -92,6 +25,7 @@ function InsightCard({ insight, source }: { insight: MarketInsight; source?: Mar
     <h3>{insight.title}</h3><p>{insight.summary}</p>
     {insight.value !== null && <div className="market-insight-value"><strong>{insight.value.toLocaleString()}</strong>{insight.unit && <span>{insight.unit}</span>}</div>}
     <div className="market-insight-attribution"><ShieldCheck size={14} /><span>Source: <b>{source?.source_name ?? insight.source_id}</b></span>{insight.geography && <span className="market-insight-geography"><Globe2 size={12} />{insight.geography}</span>}</div>
+    <dl className="market-insight-method"><div><dt>Calculation</dt><dd>{insight.calculation_method}</dd></div><div><dt>Data quality</dt><dd>{insight.data_quality}</dd></div></dl>
   </article>
 }
 
@@ -102,7 +36,21 @@ export default function MarketIntelligence() {
   const [validation, setValidation] = useState('')
   const [error, setError] = useState<{ kind: ErrorKind; message: string } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [providerStatus, setProviderStatus] = useState<MarketProviderStatus | null>(null)
+  const [providerStatusLoading, setProviderStatusLoading] = useState(true)
   const requestInFlight = useRef(false)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchProviderStatus(controller.signal).then((status) => {
+      if (!controller.signal.aborted) setProviderStatus(status)
+    }).catch(() => {
+      if (!controller.signal.aborted) setProviderStatus(null)
+    }).finally(() => {
+      if (!controller.signal.aborted) setProviderStatusLoading(false)
+    })
+    return () => controller.abort()
+  }, [])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -142,15 +90,16 @@ export default function MarketIntelligence() {
         <input id="market-job-title" name="job_title" value={jobTitle} onChange={(event) => { setJobTitle(event.target.value); setValidation('') }} maxLength={160} placeholder="e.g. Data Engineer" autoComplete="organization-title" />
         <label htmlFor="market-geography">Geography <span>Optional</span></label>
         <input id="market-geography" name="geography" value={geography} onChange={(event) => { setGeography(event.target.value); setValidation('') }} maxLength={120} placeholder="e.g. Toronto, Canada" autoComplete="address-level2" />
-        <div className="market-form-note"><Globe2 size={14} />Geography is passed as entered; availability depends on future provider coverage.</div>
+        <div className="market-form-note"><Globe2 size={14} />Geography is passed as entered; coverage depends on the configured provider.</div>
+        <div className="market-form-note" role="status"><ShieldCheck size={14} />{providerStatusLoading ? 'Checking provider availability…' : providerStatus ? `${providerStatus.provider ?? 'No provider'} · ${providerStatus.message}` : 'Provider status could not be checked; you can still request an availability result.'}</div>
         {validation && <div className="market-message market-validation" role="alert"><AlertCircle size={16} />{validation}</div>}
         {error && <div className="market-message market-error" role="alert"><AlertCircle size={16} /><span>{error.message}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
-        <div className="market-submit-row"><span><ShieldCheck size={14} />No external source is queried by this prototype</span><button type="submit" className="button-primary" disabled={loading}>{loading ? <><LoaderCircle size={15} className="spin-icon" />Checking…</> : <><Sparkles size={15} />Check availability</>}</button></div>
+        <div className="market-submit-row"><span><ShieldCheck size={14} />No candidate evidence is sent to a market provider</span><button type="submit" className="button-primary" disabled={loading}>{loading ? <><LoaderCircle size={15} className="spin-icon" />Checking…</> : <><Sparkles size={15} />Check availability</>}</button></div>
       </form>
 
       <section className="market-results" aria-live="polite" aria-busy={loading}>
         {loading ? <div className="panel market-state"><div className="market-state-icon busy"><LoaderCircle className="spin-icon" size={22} /></div><h2>Checking market-data availability</h2><p>Contacting SkillFair’s configured market-data boundary. No external provider is called unless one is explicitly connected.</p><div className="market-progress"><i /></div></div> : error ? <div className="panel market-state"><div className="market-state-icon failed"><AlertCircle size={21} /></div><h2>{error.kind === 'validation' ? 'Check the role details' : error.kind === 'network' ? 'Market Intelligence is unreachable' : 'Market data could not be checked'}</h2><p>{error.message}</p><button type="button" className="button-secondary" onClick={() => setError(null)}>Return to form</button></div> : result ? <>
-          <div className="market-result-summary panel"><div className="market-summary-top"><div><span className="eyebrow"><span className="eyebrow-line" /> MARKET DATA STATUS</span><h2>{result.job_title}</h2></div><span className={`market-status-pill ${result.data_availability}`}><i />{result.data_availability === 'available' ? 'Verified data available' : 'Data unavailable'}</span></div>
+          <div className="market-result-summary panel"><div className="market-summary-top"><div><span className="eyebrow"><span className="eyebrow-line" /> MARKET DATA STATUS</span><h2>{result.job_title}</h2></div><span className={`market-status-pill ${result.data_availability}`}><i />{result.data_availability === 'available' ? result.freshness === 'stale' ? 'Stale verified data' : 'Verified data available' : 'Data unavailable'}</span></div>
             <div className="market-request-context">{result.geography ? <span><MapPin size={14} />{result.geography}</span> : <span><Globe2 size={14} />Geography not specified</span>}<span>{result.sources.length} {result.sources.length === 1 ? 'source' : 'sources'} · {result.insights.length} {result.insights.length === 1 ? 'insight' : 'insights'}</span></div>
             <p className="market-result-message">{result.message}</p>
           </div>
@@ -163,6 +112,6 @@ export default function MarketIntelligence() {
         </> : <div className="panel market-state market-empty"><div className="market-state-icon"><BarChart3 size={22} /></div><span className="market-empty-label">READY WHEN YOU ARE</span><h2>Start with a role and location</h2><p>SkillFair will report whether sourced market data is available. It will not substitute illustrative figures when there is no provider.</p><div className="market-empty-footnote">Future SAP or other provider connections must supply verified source attribution and retrieval dates.</div></div>}
       </section>
     </div>
-    <p className="market-limitations">This module does not currently identify skill demand, compare transferable skills, or calculate candidate skill gaps. Future integrations require a verified data source.</p>
+    <p className="market-limitations">Provider data describes observations only; it does not establish causation, candidate suitability, or hiring outcomes. Skill frequency, transferable-skill relationships, and candidate skill gaps are not inferred from role vacancy counts.</p>
   </div>
 }

@@ -70,8 +70,9 @@ def postgres_test_target() -> dict[str, str]:
         try:
             parsed = make_url(values[key])
             actual = (parsed.host, parsed.port, parsed.database, parsed.username)
-        except Exception as exc:
-            raise pytest.UsageError(f"{key} is invalid for the PostgreSQL integration suite.") from exc
+        except Exception:
+            # URL parser exceptions may include the malformed URL itself.
+            raise pytest.UsageError(f"{key} is invalid for the PostgreSQL integration suite.") from None
         if actual != target or not parsed.password:
             raise pytest.UsageError(f"{key} does not target the approved SkillFair test database and role.")
 
@@ -85,12 +86,19 @@ def postgres_test_target() -> dict[str, str]:
             ).one()
             if (current_database, current_user) != ("skillfair_test_db", "skillfair_test_app"):
                 raise pytest.UsageError("PostgreSQL server identity did not match the approved test target.")
+            revisions = connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
+            if revisions != ["202611190002"]:
+                raise pytest.UsageError(
+                    "PostgreSQL test database is not at the required Alembic revision."
+                )
     except pytest.UsageError:
         raise
     except Exception as exc:
         # Driver exceptions may embed the complete connection URL. Do not chain
         # them into pytest output, which could expose local test credentials.
-        raise pytest.UsageError("The approved PostgreSQL test target is not reachable with its runtime role.") from None
+        raise pytest.UsageError(
+            "The approved PostgreSQL test target identity or Alembic revision could not be verified."
+        ) from None
     finally:
         engine.dispose()
     return {
@@ -127,6 +135,7 @@ class _OwnedBackend:
             "SKILLFAIR_AUTH_RATE_LIMIT_PER_MINUTE": "1000",
             "SKILLFAIR_DISCOVERY_RATE_LIMIT_PER_MINUTE": "1000",
             "SKILLFAIR_ORCHESTRATOR_RATE_LIMIT_PER_MINUTE": "1000",
+            "SKILLFAIR_FEEDBACK_RATE_LIMIT_PER_MINUTE": "1000",
             "SKILLFAIR_RATE_LIMIT_PER_MINUTE": "1000",
             "PGAPPNAME": "skillfair-postgres-integration-test",
         })
@@ -404,7 +413,8 @@ def _assert_one_committed_decision(case: _TestCase, client: httpx.Client, workfl
     assert restored.status_code == 200
     final = restored.json()
     winner = final["human_review"]["decision"]
-    assert success[0] == final
+    assert "workflow_inputs" in final
+    assert success[0] == {key: value for key, value in final.items() if key != "workflow_inputs"}
     assert winner in {"proceed", "revise", "stop"}
     with Session(case.engine) as session:  # type: ignore[arg-type]
         row = session.scalar(select(CareerWorkflow).where(CareerWorkflow.public_id == run_id))
@@ -498,6 +508,137 @@ def test_postgres_account_isolation_and_linked_analysis_ownership(pg_case: _Test
         session.rollback()
 
 
+def test_postgres_saved_bias_audit_and_review_selection_are_persistent_and_owner_scoped(pg_case: _TestCase):
+    case = pg_case
+    owner, _, _ = case.account("bias-audit-owner")
+    other, _, _ = case.account("bias-audit-other")
+    request = {
+        "job_title": "PostgreSQL Integration Audit",
+        "job_description": "Minimum 8 years of continuous professional experience.",
+        "requirements": [],
+    }
+
+    saved = owner.post("/api/jobs/audits", headers=case.csrf_headers(owner), json=request)
+    assert saved.status_code == 200
+    saved_body = saved.json()
+    audit_id = saved_body["audit_id"]
+    assert saved_body["result"]["finding_count"] >= 1
+    assert saved_body["review_selections"][0]["review_state"] == "needs_review"
+    assert "job_description" not in saved_body and "owner_user_id" not in saved_body
+
+    updated = owner.patch(
+        f"/api/jobs/audits/{audit_id}/findings/0",
+        headers=case.csrf_headers(owner),
+        json={"review_state": "accepted"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["review_selections"][0]["review_state"] == "accepted"
+
+    restored = owner.get(f"/api/jobs/audits/{audit_id}")
+    assert restored.status_code == 200
+    assert restored.json()["audit_id"] == audit_id
+    assert restored.json()["review_selections"][0]["review_state"] == "accepted"
+    assert other.get("/api/jobs/audits").json()["audits"] == []
+    assert other.get(f"/api/jobs/audits/{audit_id}").status_code == 404
+    assert other.patch(
+        f"/api/jobs/audits/{audit_id}/findings/0",
+        headers=case.csrf_headers(other),
+        json={"review_state": "dismissed"},
+    ).status_code == 404
+    assert other.delete(f"/api/jobs/audits/{audit_id}", headers=case.csrf_headers(other)).status_code == 404
+
+    with Session(case.engine) as session:  # type: ignore[arg-type]
+        from app.db_models import BiasAudit, BiasAuditReviewSelection, User
+
+        owner_id = session.scalar(select(User.id).where(User.email_normalized.like(
+            f"pgint-{case.run_tag}-bias-audit-owner@%"
+        )))
+        audit = session.scalar(select(BiasAudit).where(BiasAudit.public_id == audit_id))
+        selection = session.scalar(select(BiasAuditReviewSelection).where(
+            BiasAuditReviewSelection.audit_id == audit.id,
+            BiasAuditReviewSelection.finding_index == 0,
+        )) if audit is not None else None
+        assert owner_id is not None and audit is not None
+        assert audit.owner_user_id == owner_id
+        assert selection is not None and selection.owner_user_id == owner_id
+        assert selection.review_state == "accepted"
+        assert not hasattr(audit, "job_description")
+
+
+def test_postgres_notifications_persist_across_restart_and_are_owner_scoped(pg_case: _TestCase):
+    case = pg_case
+    owner, _, _ = case.account("notification-owner")
+    other, _, _ = case.account("notification-other")
+    analysis = case.analysis(owner)
+    workflow = case.workflow(owner, analysis["analysis_id"])
+    run_id = workflow["run_id"]
+    review_url = f"/api/career/orchestrator/runs/{run_id}/review"
+    review_payload = _review_payload(workflow, "proceed")
+
+    decision = owner.post(review_url, headers=case.csrf_headers(owner), json=review_payload)
+    assert decision.status_code == 200
+    assert decision.json()["learning_pathways"]["status"] == "complete"
+    duplicate = owner.post(review_url, headers=case.csrf_headers(owner), json=review_payload)
+    assert duplicate.status_code == 200
+    assert duplicate.json() == decision.json()
+
+    before_restart = owner.get("/api/notifications?limit=10")
+    assert before_restart.status_code == 200
+    notifications = before_restart.json()["notifications"]
+    assert len(notifications) == 2
+    assert {item["notification_type"] for item in notifications} == {
+        "workflow_decision", "learning_pathways_ready",
+    }
+    assert all(item["workflow_id"] == run_id and item["read_at"] is None for item in notifications)
+    assert "owner_user_id" not in before_restart.text
+    notification_id = next(
+        item["notification_id"] for item in notifications
+        if item["notification_type"] == "workflow_decision"
+    )
+
+    assert other.get("/api/notifications").json() == {"notifications": [], "unread_count": 0}
+    assert other.post(
+        f"/api/notifications/{notification_id}/read",
+        headers=case.csrf_headers(other),
+    ).status_code == 404
+
+    with Session(case.engine) as session:  # type: ignore[arg-type]
+        from app.db_models import User, UserNotification
+
+        owner_id = session.scalar(select(User.id).where(User.email_normalized.like(
+            f"pgint-{case.run_tag}-notification-owner@%"
+        )))
+        rows = session.scalars(select(UserNotification).where(
+            UserNotification.owner_user_id == owner_id,
+            UserNotification.workflow_id.is_not(None),
+        )).all()
+        assert owner_id is not None and len(rows) == 2
+        assert len({row.source_event_key for row in rows}) == 2
+        assert all(row.owner_user_id == owner_id for row in rows)
+
+    case.backend.restart()
+    after_restart = owner.get("/api/notifications?limit=10")
+    assert after_restart.status_code == 200
+    assert {item["notification_id"] for item in after_restart.json()["notifications"]} == {
+        item["notification_id"] for item in notifications
+    }
+    marked = owner.post(
+        f"/api/notifications/{notification_id}/read",
+        headers=case.csrf_headers(owner),
+    )
+    assert marked.status_code == 200 and marked.json()["read_at"] is not None
+
+    case.backend.restart()
+    restored_read_state = owner.get("/api/notifications?limit=10")
+    assert restored_read_state.status_code == 200
+    restored_notification = next(
+        item for item in restored_read_state.json()["notifications"]
+        if item["notification_id"] == notification_id
+    )
+    assert restored_notification["read_at"] is not None
+    assert restored_read_state.json()["unread_count"] == 1
+
+
 @pytest.mark.parametrize("decisions", [("proceed", "revise"), ("proceed", "stop")])
 def test_postgres_concurrent_conflicting_reviews_commit_exactly_one(pg_case: _TestCase, decisions: tuple[str, str]):
     case = pg_case
@@ -527,14 +668,32 @@ def _assert_one_idempotent_state(case: _TestCase, client: httpx.Client, workflow
     final_response = client.get(f"/api/career/orchestrator/runs/{run_id}")
     assert final_response.status_code == 200
     final = final_response.json()
-    assert responses[0][1] == final == responses[1][1]
+    post_responses = [body for status, body in responses if status == 200]
+    assert len(post_responses) == 2
+    assert post_responses[0] == post_responses[1]
+    assert "workflow_inputs" in final
+    assert post_responses[0] == {
+        key: value for key, value in final.items() if key != "workflow_inputs"
+    }
     assert final["workflow_status"] == "complete"
     assert final["learning_pathways"]["status"] == "complete"
     assert final["learning_pathways"]["result"] is not None
     with Session(case.engine) as session:  # type: ignore[arg-type]
         row = session.scalar(select(CareerWorkflow).where(CareerWorkflow.public_id == run_id))
         assert row is not None and row.version == 2
-        assert len(session.scalars(select(WorkflowReview).where(WorkflowReview.workflow_id == row.id)).all()) == 1
+        reviews = session.scalars(select(WorkflowReview).where(WorkflowReview.workflow_id == row.id)).all()
+        assert len(reviews) == 1 and reviews[0].decision == "proceed"
+        from app.db_models import UserNotification
+
+        notifications = session.scalars(select(UserNotification).where(
+            UserNotification.owner_user_id == row.owner_user_id,
+            UserNotification.workflow_id == row.id,
+        )).all()
+        assert len(notifications) == 2
+        assert {item.notification_type for item in notifications} == {
+            "workflow_decision", "learning_pathways_ready",
+        }
+        assert len({item.source_event_key for item in notifications}) == 2
     return final
 
 
@@ -754,7 +913,16 @@ def test_postgres_impact_is_account_scoped_persistent_and_uses_committed_workflo
     }
     assert summary["baseline_comparison"]["data_availability"] == "measured"
     assert summary["baseline_comparison"]["baseline_sample_size"] == 5
-    assert summary["candidate_rating_distribution"][0]["data_availability"] == "unavailable"
+    assert summary["candidate_rating_distribution"] == []
+    candidate_distributions = summary["candidate_feedback_distributions"]
+    assert {item["metric_id"] for item in candidate_distributions} == {
+        "candidate_application_experience",
+        "candidate_process_accessibility",
+        "candidate_job_requirements_clarity",
+        "candidate_perceived_fairness",
+    }
+    assert all(item["sample_size"] == 0 for item in candidate_distributions)
+    assert all(item["data_availability"] == "awaiting_data" for item in candidate_distributions)
     assert not any(key in str(summary) for key in (str(UUID(recruiter.get("/api/auth/me").json()["id"])), workflows[0]["run_id"]))
 
     other_summary = other.get("/api/impact/summary?category=all").json()
@@ -1004,7 +1172,7 @@ def test_postgres_impact_summaries_are_isolated_and_identifier_free(pg_case: _Te
     assert metrics_b["completed_reviews"]["sample_size"] == 0
     assert metrics_b["recruiter_evidence_usefulness"]["sample_size"] == 0
     assert summary_b["baseline_comparison"]["baseline_sample_size"] == 0
-    assert metrics_b["candidate_experience_average"]["data_availability"] == "unavailable"
+    assert metrics_b["candidate_application_experience"]["data_availability"] == "awaiting_data"
 
     # Cross-account workflow references are rejected for feedback creation.
     foreign_reference = _post_feedback(case, client_a, workflow_id=case.workflow(
@@ -1034,22 +1202,23 @@ def test_postgres_impact_consent_csrf_and_candidate_feedback_rules(pg_case: _Tes
     candidate = client.post("/api/impact/feedback/candidate", headers=case.csrf_headers(client), json={
         "submission_id": str(uuid4()),
         "consent_to_aggregate": False,
-        "skill_representation_clarity": 4,
-        "understanding_of_skills": 4,
-        "perceived_transparency": 4,
-        "overall_experience": 4,
+        "application_experience": 4,
+        "process_accessibility": 4,
+        "job_requirements_clarity": 4,
+        "perceived_fairness": 4,
     })
     assert candidate.status_code == 422
 
     candidate_consented = client.post("/api/impact/feedback/candidate", headers=case.csrf_headers(client), json={
         "submission_id": str(uuid4()),
         "consent_to_aggregate": True,
-        "skill_representation_clarity": 4,
-        "understanding_of_skills": 4,
-        "perceived_transparency": 4,
-        "overall_experience": 4,
+        "application_experience": 4,
+        "process_accessibility": 4,
+        "job_requirements_clarity": 4,
+        "perceived_fairness": 4,
     })
-    assert candidate_consented.status_code == 410
+    assert candidate_consented.status_code == 200
+    assert candidate_consented.json()["accepted"] is True
 
     # CSRF is required for every Impact write, even with a valid session.
     missing_csrf = client.post("/api/impact/feedback/recruiter", headers={"Origin": _ORIGIN}, json={
@@ -1069,11 +1238,14 @@ def test_postgres_impact_consent_csrf_and_candidate_feedback_rules(pg_case: _Tes
 
     owner_id = UUID(client.get("/api/auth/me").json()["id"])
     with Session(case.engine) as session:  # type: ignore[arg-type]
-        from app.db_models import CandidateFeedback
+        from app.db_models import CandidateExperienceFeedback, CandidateFeedback
 
         assert session.scalar(select(CandidateFeedback.id).where(
             CandidateFeedback.owner_user_id == owner_id
         )) is None
+        assert session.scalar(select(CandidateExperienceFeedback.id).where(
+            CandidateExperienceFeedback.owner_user_id == owner_id
+        )) is not None
         assert session.scalar(select(RecruiterFeedback.id).where(
             RecruiterFeedback.owner_user_id == owner_id
         )) is None
@@ -1405,3 +1577,52 @@ def test_postgres_impact_restart_preserves_login_and_dashboard_aggregates(pg_cas
     assert restored_workflow.status_code == 200
     assert restored_workflow.json()["human_review"]["decision"] == "proceed"
     assert restored.get("/api/skills/analyses/latest").json()["analysis_id"] == analysis["analysis_id"]
+
+
+def test_postgres_concurrent_duplicate_workflow_deletion_has_one_winner(pg_case: _TestCase):
+    """Exercise atomic owner-scoped DELETE contention against the dedicated PostgreSQL target."""
+    case = pg_case
+    first, email, password = case.account("workflow-delete-race")
+    analysis = case.analysis(first)
+    workflow = case.workflow(first, analysis["analysis_id"])
+    second = case.additional_session(email, password, first)
+    run_id = workflow["run_id"]
+
+    # Hold the target row so both independently authenticated requests reach
+    # the DELETE statement before either can commit.
+    holder = Session(case.engine)  # type: ignore[arg-type]
+    locked_id = holder.scalar(
+        select(CareerWorkflow.id).where(CareerWorkflow.public_id == run_id).with_for_update()
+    )
+    assert locked_id is not None
+    barrier = threading.Barrier(3)
+
+    def remove(client: httpx.Client) -> int:
+        csrf = client.cookies.get(CSRF_COOKIE_NAME)
+        assert csrf
+        barrier.wait(timeout=15)
+        return client.delete(
+            f"/api/account/workflows/{run_id}",
+            headers={"Origin": _ORIGIN, "X-CSRF-Token": csrf},
+        ).status_code
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(remove, client) for client in (first, second)]
+            barrier.wait(timeout=15)
+            try:
+                _wait_for_postgres_lock_waiters(case, "%DELETE FROM career_workflows%")
+            except BaseException:
+                holder.rollback()
+                raise
+            holder.rollback()
+            statuses = sorted(future.result(timeout=40) for future in futures)
+        assert statuses == [204, 404]
+    finally:
+        holder.rollback()
+        holder.close()
+
+    with Session(case.engine) as session:  # type: ignore[arg-type]
+        workflow_id = session.scalar(select(CareerWorkflow.id).where(CareerWorkflow.public_id == run_id))
+        assert workflow_id is None
+        assert session.scalar(select(WorkflowReview.id).where(WorkflowReview.workflow_id == locked_id)) is None

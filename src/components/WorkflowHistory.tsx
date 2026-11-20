@@ -40,6 +40,7 @@ export default function WorkflowHistory({ state, action, onRefresh, onContinue }
           <div className="career-history-item-main">
             <div className="career-history-item-heading"><h3>{item.job_title}</h3><span className={`career-history-status status-${item.workflow_status}`}>{STATUS_LABELS[item.workflow_status]}</span></div>
             <div className="career-history-dates"><span><Clock3 size={12} />Created {formatDate(item.created_at)}</span><span>Updated {formatDate(item.updated_at)}</span></div>
+            {item.review_decision && <small className="career-history-decision">Human review decision · {item.review_decision}</small>}
             <small className="career-history-run-id">Workflow ID · {item.run_id}</small>
             {itemAction?.status === 'error' && <p className="career-history-item-error" role="alert">{itemAction.message}</p>}
           </div>
