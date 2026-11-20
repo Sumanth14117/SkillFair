@@ -44,7 +44,8 @@ from .database import check_database_health, dispose_database_engine, get_db_ses
 from .db_models import CareerWorkflow
 from .dashboard import get_dashboard_overview
 from .data_management import build_account_export, delete_analysis, delete_workflow, get_account_data
-from .market_intelligence import MarketDataProviderError, market_intelligence_service
+from .market_intelligence import MarketDataProviderError, MarketDataRateLimitedError, market_intelligence_service
+from .market_adzuna import configured_market_provider
 from .matching import match_job_skills
 from .protections import RateLimitMiddleware, RequestBodyLimitMiddleware, SecurityHeadersMiddleware
 from .transferable_skills import build_transferable_skills
@@ -128,9 +129,11 @@ if not any(isinstance(item, _RedactCareerRunIdAccessLog) for item in _uvicorn_ac
 async def lifespan(_app: FastAPI):
     # Do not require or connect to PostgreSQL at startup; release a lazily
     # created pool only when the application is shutting down.
+    market_intelligence_service.configure_provider(configured_market_provider())
     try:
         yield
     finally:
+        market_intelligence_service.configure_provider(None)
         dispose_database_engine()
 
 
@@ -423,6 +426,12 @@ def learning_pathways(request: LearningPathwaysRequest) -> LearningPathwaysRespo
 def market_intelligence(request: MarketIntelligenceRequest) -> MarketIntelligenceResponse:
     try:
         return market_intelligence_service.query(request)
+    except MarketDataRateLimitedError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The configured market-data source is temporarily rate limited. Try again later.",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from None
     except MarketDataProviderError as exc:
         raise HTTPException(
             status_code=502,

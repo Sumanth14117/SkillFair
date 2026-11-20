@@ -356,6 +356,8 @@ class MarketIntelligenceRequest(BaseModel):
 
     job_title: str = Field(min_length=1, max_length=160)
     geography: str | None = Field(default=None, min_length=1, max_length=120)
+    country_code: Literal["gb", "us", "at", "au", "be", "br", "ca", "ch", "de", "es", "fr", "in", "it", "mx", "nl", "nz", "pl", "sg", "za"] = "in"
+    skill_queries: list[str] = Field(default_factory=list, max_length=5)
 
     @field_validator("job_title", "geography")
     @classmethod
@@ -366,6 +368,21 @@ class MarketIntelligenceRequest(BaseModel):
         if not value:
             raise ValueError("must not be blank")
         return value
+
+    @field_validator("skill_queries")
+    @classmethod
+    def normalize_skill_queries(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            skill = value.strip()
+            if not skill or len(skill) > 100:
+                raise ValueError("skill queries must contain 1 to 100 non-whitespace characters")
+            key = skill.casefold()
+            if key not in seen:
+                normalized.append(skill)
+                seen.add(key)
+        return normalized
 
 
 class MarketDataSource(BaseModel):

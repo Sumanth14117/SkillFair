@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertCircle, BarChart3, CalendarDays, Database, Globe2, LoaderCircle, MapPin, ShieldCheck, Sparkles } from 'lucide-react'
-import { fetchMarketIntelligence, fetchProviderStatus, type MarketDataSource, type MarketErrorKind, type MarketInsight, type MarketIntelligenceResult, type MarketProviderStatus } from '../marketIntelligenceClient'
+import { fetchMarketIntelligence, fetchProviderStatus, type MarketCountryCode, type MarketDataSource, type MarketErrorKind, type MarketInsight, type MarketIntelligenceResult, type MarketProviderStatus } from '../marketIntelligenceClient'
 import '../styles/market-intelligence.css'
 
 type ErrorKind = MarketErrorKind
@@ -29,9 +29,20 @@ function InsightCard({ insight, source }: { insight: MarketInsight; source?: Mar
   </article>
 }
 
+const MARKET_COUNTRIES: { code: MarketCountryCode; name: string }[] = [
+  { code: 'in', name: 'India' }, { code: 'gb', name: 'United Kingdom' }, { code: 'us', name: 'United States' },
+  { code: 'au', name: 'Australia' }, { code: 'ca', name: 'Canada' }, { code: 'sg', name: 'Singapore' },
+  { code: 'za', name: 'South Africa' }, { code: 'at', name: 'Austria' }, { code: 'be', name: 'Belgium' },
+  { code: 'br', name: 'Brazil' }, { code: 'ch', name: 'Switzerland' }, { code: 'de', name: 'Germany' },
+  { code: 'es', name: 'Spain' }, { code: 'fr', name: 'France' }, { code: 'it', name: 'Italy' },
+  { code: 'mx', name: 'Mexico' }, { code: 'nl', name: 'Netherlands' }, { code: 'nz', name: 'New Zealand' }, { code: 'pl', name: 'Poland' },
+]
+
 export default function MarketIntelligence() {
   const [jobTitle, setJobTitle] = useState('')
   const [geography, setGeography] = useState('')
+  const [countryCode, setCountryCode] = useState<MarketCountryCode>('in')
+  const [skillQueries, setSkillQueries] = useState('')
   const [result, setResult] = useState<MarketIntelligenceResult | null>(null)
   const [validation, setValidation] = useState('')
   const [error, setError] = useState<{ kind: ErrorKind; message: string } | null>(null)
@@ -67,7 +78,10 @@ export default function MarketIntelligence() {
     setValidation('')
     setResult(null)
     try {
-      const payload = { job_title: title, ...(place ? { geography: place } : {}) }
+      const skills = [...new Set(skillQueries.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean))]
+      if (skills.length > 5) { setValidation('Enter no more than five skill keywords.'); return }
+      if (skills.some((skill) => skill.length > 100)) { setValidation('Each skill keyword must be 100 characters or fewer.'); return }
+      const payload = { job_title: title, country_code: countryCode, ...(place ? { geography: place } : {}), ...(skills.length ? { skill_queries: skills } : {}) }
       setResult(await fetchMarketIntelligence(payload))
     } catch (reason) {
       const failure = reason as Error & { kind?: ErrorKind }
@@ -90,7 +104,13 @@ export default function MarketIntelligence() {
         <input id="market-job-title" name="job_title" value={jobTitle} onChange={(event) => { setJobTitle(event.target.value); setValidation('') }} maxLength={160} placeholder="e.g. Data Engineer" autoComplete="organization-title" />
         <label htmlFor="market-geography">Geography <span>Optional</span></label>
         <input id="market-geography" name="geography" value={geography} onChange={(event) => { setGeography(event.target.value); setValidation('') }} maxLength={120} placeholder="e.g. Toronto, Canada" autoComplete="address-level2" />
-        <div className="market-form-note"><Globe2 size={14} />Geography is passed as entered; coverage depends on the configured provider.</div>
+        <label htmlFor="market-country">Market country</label>
+        <select id="market-country" name="country_code" value={countryCode} onChange={(event) => setCountryCode(event.target.value as MarketCountryCode)}>
+          {MARKET_COUNTRIES.map((country) => <option key={country.code} value={country.code}>{country.name}</option>)}
+        </select>
+        <label htmlFor="market-skills">Skill keywords <span>Optional · up to five</span></label>
+        <textarea id="market-skills" name="skill_queries" rows={3} maxLength={600} value={skillQueries} onChange={(event) => { setSkillQueries(event.target.value); setValidation('') }} placeholder={'Python\nSQL'} />
+        <div className="market-form-note"><Globe2 size={14} />Country uses the provider's supported market code; geography is passed as entered within that country.</div>
         <div className="market-form-note" role="status"><ShieldCheck size={14} />{providerStatusLoading ? 'Checking provider availability…' : providerStatus ? `${providerStatus.provider ?? 'No provider'} · ${providerStatus.message}` : 'Provider status could not be checked; you can still request an availability result.'}</div>
         {validation && <div className="market-message market-validation" role="alert"><AlertCircle size={16} />{validation}</div>}
         {error && <div className="market-message market-error" role="alert"><AlertCircle size={16} /><span>{error.message}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
@@ -105,6 +125,7 @@ export default function MarketIntelligence() {
           </div>
           {result.data_availability === 'available' && result.insights.length > 0 ? <>
             <div className="market-section-heading"><div><h2>Sourced insights</h2><p>Every insight below is linked to its returned source record.</p></div><span>{result.insights.length}</span></div>
+            {result.insights.length > 1 && <section className="market-demand-chart" aria-label="Observed job-ad count comparison"><h3>Current indexed job-ad counts</h3>{result.insights.map((insight) => <div className="market-demand-row" key={insight.insight_id}><span>{insight.title}</span><progress max={Math.max(1, ...result.insights.map((item) => item.value ?? 0))} value={insight.value ?? 0} aria-label={`${insight.title}: ${insight.value ?? 'unavailable'} ${insight.unit ?? ''}`} /><b>{insight.value?.toLocaleString() ?? 'Unavailable'}</b></div>)}<p>Counts are provider search results for the same retrieval window; they are not a census, share of all jobs, or candidate skill evidence.</p></section>}
             <div className="market-insights">{result.insights.map((insight) => <InsightCard key={insight.insight_id} insight={insight} source={sourceById.get(insight.source_id)} />)}</div>
             <div className="market-section-heading market-sources-heading"><div><h2>Data provenance</h2><p>Provider attribution and timestamps returned by the service.</p></div></div>
             <div className="market-sources">{result.sources.map((source) => <MarketSource key={source.source_id} source={source} />)}</div>
@@ -112,6 +133,7 @@ export default function MarketIntelligence() {
         </> : <div className="panel market-state market-empty"><div className="market-state-icon"><BarChart3 size={22} /></div><span className="market-empty-label">READY WHEN YOU ARE</span><h2>Start with a role and location</h2><p>SkillFair will report whether sourced market data is available. It will not substitute illustrative figures when there is no provider.</p><div className="market-empty-footnote">Future SAP or other provider connections must supply verified source attribution and retrieval dates.</div></div>}
       </section>
     </div>
+    <section className="market-capability-limits" aria-labelledby="market-capability-title"><h2 id="market-capability-title">What this source can and cannot show</h2><div><p><b>Current role and entered-keyword demand:</b> available only when a provider returns attributable search counts.</p><p><b>Emerging or declining skills:</b> unavailable; the connected search source does not return a historical skill-frequency series.</p><p><b>Related or transferable skills:</b> not inferred from co-occurring job-ad keywords. Use SkillFair's separately curated Transferable Skills workflow for evidence-aware exploration.</p><p><b>Candidate skill gaps:</b> not calculated from market counts. A gap requires comparison with the candidate's validated evidence and human review.</p></div></section>
     <p className="market-limitations">Provider data describes observations only; it does not establish causation, candidate suitability, or hiring outcomes. Skill frequency, transferable-skill relationships, and candidate skill gaps are not inferred from role vacancy counts.</p>
   </div>
 }

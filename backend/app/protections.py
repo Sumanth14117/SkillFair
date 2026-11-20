@@ -59,8 +59,9 @@ class InMemoryRateLimiter:
         max_entries: int = MAX_TRACKED_CLIENT_BUCKETS,
         clock: Callable[[], float] = time.monotonic,
         feedback_limit: int = 10,
+        market_limit: int = 10,
     ) -> None:
-        if min(default_limit, discovery_limit, orchestrator_limit, auth_limit, feedback_limit, window_seconds, max_entries) <= 0:
+        if min(default_limit, discovery_limit, orchestrator_limit, auth_limit, feedback_limit, market_limit, window_seconds, max_entries) <= 0:
             raise ValueError("rate limiter settings must be positive")
         self._limits = {
             "default": default_limit,
@@ -68,6 +69,7 @@ class InMemoryRateLimiter:
             "orchestrator": orchestrator_limit,
             "auth": auth_limit,
             "feedback": feedback_limit,
+            "market": market_limit,
         }
         self._window_seconds = window_seconds
         self._max_entries = max_entries
@@ -123,6 +125,8 @@ def _request_group(path: str) -> str:
         return "orchestrator"
     if path.startswith("/api/auth/"):
         return "auth"
+    if path.startswith("/api/market/"):
+        return "market"
     return "default"
 
 
@@ -152,6 +156,7 @@ class RateLimitMiddleware:
             orchestrator_limit=_configured_rate("SKILLFAIR_ORCHESTRATOR_RATE_LIMIT_PER_MINUTE", 20),
             auth_limit=_configured_rate("SKILLFAIR_AUTH_RATE_LIMIT_PER_MINUTE", 10),
             feedback_limit=_configured_rate("SKILLFAIR_FEEDBACK_RATE_LIMIT_PER_MINUTE", 10),
+            market_limit=_configured_rate("SKILLFAIR_MARKET_RATE_LIMIT_PER_MINUTE", 10),
         )
 
     async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:

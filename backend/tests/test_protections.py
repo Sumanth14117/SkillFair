@@ -346,8 +346,8 @@ def test_application_places_body_and_rate_limits_before_multipart_parser():
     assert middleware_names.index("RateLimitMiddleware") < middleware_names.index("RequestBodyLimitMiddleware")
 
 
-def test_rate_limit_policy_uses_specific_buckets_for_discovery_and_orchestrator():
-    limiter = InMemoryRateLimiter(default_limit=10, discovery_limit=1, orchestrator_limit=2, auth_limit=3)
+def test_rate_limit_policy_uses_specific_buckets_for_discovery_orchestrator_and_market():
+    limiter = InMemoryRateLimiter(default_limit=10, discovery_limit=1, orchestrator_limit=2, auth_limit=3, market_limit=2)
     assert limiter.check("192.0.2.1", "discovery").allowed
     assert not limiter.check("192.0.2.1", "discovery").allowed
     assert limiter.check("192.0.2.1", "orchestrator").allowed
@@ -362,6 +362,11 @@ def test_rate_limit_policy_uses_specific_buckets_for_discovery_and_orchestrator(
     assert _request_group("/api/auth/login") == "auth"
     assert _request_group("/api/impact/feedback/candidate") == "feedback"
     assert _request_group("/api/jobs/audits") == "feedback"
+    assert _request_group("/api/market/intelligence") == "market"
+    assert _request_group("/api/market/provider-status") == "market"
     feedback_limiter = InMemoryRateLimiter(feedback_limit=1)
     assert feedback_limiter.check("192.0.2.1", "feedback").allowed
     assert not feedback_limiter.check("192.0.2.1", "feedback").allowed
+    market_limiter = InMemoryRateLimiter(market_limit=1)
+    assert market_limiter.check("192.0.2.1", "market").allowed
+    assert not market_limiter.check("192.0.2.1", "market").allowed

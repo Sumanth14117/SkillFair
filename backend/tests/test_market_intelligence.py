@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app import main
-from app.market_intelligence import MarketDataProviderError, MarketIntelligenceService
+from app.market_intelligence import MarketDataProviderError, MarketDataRateLimitedError, MarketIntelligenceService
 from app.models import (
     MarketDataSnapshot,
     MarketIntelligenceRequest,
@@ -231,6 +231,31 @@ def test_provider_outage_serves_attributed_stale_snapshot_with_warning():
     assert stale.insights == first.insights
     assert "could not refresh" in stale.message
     assert "private provider details" not in stale.message
+
+
+def test_rate_limit_without_stale_snapshot_preserves_safe_retry_hint():
+    provider = FixtureProvider(sourced_snapshot())
+    provider.failure = MarketDataRateLimitedError(75)
+    service = MarketIntelligenceService(provider)
+
+    with pytest.raises(MarketDataRateLimitedError) as error:
+        service.query(request())
+
+    assert error.value.retry_after_seconds == 75
+    assert str(error.value) == "Configured market-data source is temporarily rate limited."
+
+
+def test_market_endpoint_maps_rate_limit_to_safe_503_and_retry_after(monkeypatch):
+    provider = FixtureProvider(sourced_snapshot())
+    provider.failure = MarketDataRateLimitedError(75)
+    monkeypatch.setattr(main, "market_intelligence_service", MarketIntelligenceService(provider))
+
+    with pytest.raises(main.HTTPException) as error:
+        main.market_intelligence(request())
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "75"}
+    assert error.value.detail == "The configured market-data source is temporarily rate limited. Try again later."
 
 
 @pytest.mark.parametrize("failure", [TimeoutError("timed out"), ConnectionError("offline"), RuntimeError("rate limit response")])

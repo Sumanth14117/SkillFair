@@ -24,6 +24,9 @@
     "test:job-audit": "node --experimental-strip-types --test tests/job-audit-client.test.mjs",
     "test:bias-audit": "node --experimental-strip-types --test tests/bias-audit-persistence.test.mjs",
     "test:resume-upload": "node --experimental-strip-types --test tests/resume-upload.test.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium",
+    "e2e:server": "vite --config vite.e2e.config.ts",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -36,6 +39,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
+    "@playwright/test": "^1.65.1",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
@@ -44,7 +48,7 @@
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.4.0",
     "typescript": "~5.9.2",
-    "typescript-eslint": "^8.44.0",
+    "typescript-eslint": "^8.73.0",
     "vite": "^7.1.7"
   }
 }

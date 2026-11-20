@@ -48,6 +48,14 @@ class MarketDataProviderError(Exception):
     """Safe error raised when a configured provider fails contract validation."""
 
 
+class MarketDataRateLimitedError(MarketDataProviderError):
+    """Safe provider rate-limit result with a bounded retry hint."""
+
+    def __init__(self, retry_after_seconds: int = 60) -> None:
+        super().__init__("Configured market-data source is temporarily rate limited.")
+        self.retry_after_seconds = max(1, min(int(retry_after_seconds), 3600))
+
+
 @dataclass(frozen=True)
 class _CachedSnapshot:
     stored_at: float
@@ -71,8 +79,14 @@ class MarketIntelligenceService:
         self._stale_ttl_seconds = stale_ttl_seconds
         self._max_cache_entries = max_cache_entries
         self._clock = clock
-        self._cache: OrderedDict[tuple[str, str], _CachedSnapshot] = OrderedDict()
+        self._cache: OrderedDict[tuple[str, str, str, tuple[str, ...]], _CachedSnapshot] = OrderedDict()
         self._cache_lock = threading.Lock()
+
+    def configure_provider(self, provider: MarketDataProvider | None) -> None:
+        """Change provider only during app lifecycle and discard cross-provider cache entries."""
+        with self._cache_lock:
+            self._provider = provider
+            self._cache.clear()
 
     def provider_status(self) -> MarketProviderStatusResponse:
         if self._provider is None:
@@ -118,6 +132,8 @@ class MarketIntelligenceService:
             )
             self._put_cache(key, snapshot)
             return response
+        except MarketDataRateLimitedError as exc:
+            failure = exc
         except (ValidationError, ValueError):
             failure = MarketDataProviderError("Configured market-data source returned invalid provenance or data.")
         except Exception:
@@ -133,10 +149,15 @@ class MarketIntelligenceService:
         raise failure from None
 
     @staticmethod
-    def _cache_key(request: MarketIntelligenceRequest) -> tuple[str, str]:
-        return (request.job_title.casefold(), (request.geography or "").casefold())
+    def _cache_key(request: MarketIntelligenceRequest) -> tuple[str, str, str, tuple[str, ...]]:
+        return (
+            request.job_title.casefold(),
+            (request.geography or "").casefold(),
+            request.country_code,
+            tuple(skill.casefold() for skill in request.skill_queries),
+        )
 
-    def _get_cache(self, key: tuple[str, str]) -> _CachedSnapshot | None:
+    def _get_cache(self, key: tuple[str, str, str, tuple[str, ...]]) -> _CachedSnapshot | None:
         now = self._clock()
         with self._cache_lock:
             for old_key, entry in list(self._cache.items()):
@@ -147,7 +168,7 @@ class MarketIntelligenceService:
                 self._cache.move_to_end(key)
             return entry
 
-    def _put_cache(self, key: tuple[str, str], snapshot: MarketDataSnapshot) -> None:
+    def _put_cache(self, key: tuple[str, str, str, tuple[str, ...]], snapshot: MarketDataSnapshot) -> None:
         with self._cache_lock:
             self._cache[key] = _CachedSnapshot(stored_at=self._clock(), snapshot=snapshot)
             self._cache.move_to_end(key)

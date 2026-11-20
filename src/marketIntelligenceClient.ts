@@ -35,6 +35,8 @@ export type MarketIntelligenceResult = {
   message: string
 }
 
+export type MarketCountryCode = 'gb' | 'us' | 'at' | 'au' | 'be' | 'br' | 'ca' | 'ch' | 'de' | 'es' | 'fr' | 'in' | 'it' | 'mx' | 'nl' | 'nz' | 'pl' | 'sg' | 'za'
+
 export type MarketProviderStatus = {
   provider: string | null
   availability: 'available' | 'unavailable' | 'not_configured'
@@ -53,7 +55,7 @@ function getValidationMessage(detail: unknown): string {
   return ''
 }
 
-export async function fetchMarketIntelligence(payload: { job_title: string; geography?: string }): Promise<MarketIntelligenceResult> {
+export async function fetchMarketIntelligence(payload: { job_title: string; geography?: string; country_code: MarketCountryCode; skill_queries?: string[] }): Promise<MarketIntelligenceResult> {
   let response: Response
   try {
     response = await skillFairFetch('/api/market/intelligence', {
