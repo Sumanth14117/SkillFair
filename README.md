@@ -222,6 +222,10 @@ The repository includes starter configuration for a controlled, non-commercial p
 
 Before deployment, verify that the destination in [`vercel.json`](vercel.json) uses the actual Render service hostname. The Render service is configured in [`render.yaml`](render.yaml) and tracks `main`; its start command uses the FastAPI `app` exported by `app.main`.
 
+### Preview and production deployment control
+
+Vercel's Production Branch is configured in the Vercel project dashboard; `vercel.json` does not select it. Git pushes and pull requests from other branches are Preview deployments, so a successful Preview does not make that commit live on the production domain. Before release, verify the dashboard's Production Branch and Git deployment behavior. Render is a separate deployment: the checked-in Blueprint specifies `branch: main` and `autoDeploy: false`, so merging to `main` does not by itself update the Render backend. Confirm the live Render service has been synchronized with the Blueprint, and manually deploy the intended backend revision only after the database migration and backend smoke checks are complete. Coordinate Vercel production deployment so new frontend routes do not reach an older backend. Keep production deployment gated until the target database revision and backup/recovery plan are verified.
+
 Set these values in the Render service dashboard, without adding credentials to this repository:
 
 - `PYTHON_VERSION`: `3.14.7`.
