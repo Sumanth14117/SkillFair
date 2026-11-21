@@ -6,7 +6,9 @@ The first database operation requires DATABASE_URL to be configured.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import threading
 from collections.abc import Generator
 
@@ -18,6 +20,10 @@ from sqlalchemy.pool import StaticPool
 from fastapi import HTTPException
 
 from .models import DatabaseHealthResponse
+
+
+_logger = logging.getLogger(__name__)
+_SQLSTATE_PATTERN = re.compile(r"[0-9A-Z]{5}")
 
 
 class DatabaseConfigurationError(RuntimeError):
@@ -148,7 +154,26 @@ def check_database_health() -> DatabaseHealthResponse:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
         return DatabaseHealthResponse(status="reachable", configured=True, reachable=True)
-    except (DatabaseConfigurationError, SQLAlchemyError):
+    except DatabaseConfigurationError:
+        return DatabaseHealthResponse(status="unavailable", configured=True, reachable=False)
+    except SQLAlchemyError as exc:
+        # Keep this diagnostic deliberately allow-listed: exception messages and
+        # tracebacks can contain connection details supplied by the DB driver.
+        sqlstate: str | None = None
+        try:
+            candidate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            if isinstance(candidate, str):
+                normalized = candidate.upper()
+                if _SQLSTATE_PATTERN.fullmatch(normalized):
+                    sqlstate = normalized
+        except Exception:
+            # Driver-specific SQLSTATE access must never break the health probe.
+            pass
+        _logger.warning(
+            "Database health probe failed (exception_class=%s, sqlstate=%s)",
+            type(exc).__name__,
+            sqlstate or "unavailable",
+        )
         return DatabaseHealthResponse(status="unavailable", configured=True, reachable=False)
 
 

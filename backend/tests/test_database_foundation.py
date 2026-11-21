@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 import pytest
@@ -198,3 +199,50 @@ def test_database_health_reports_unconfigured_reachable_and_unavailable(monkeypa
     assert failed.configured is True and failed.reachable is False
     assert "secret" not in failed.model_dump_json()
     assert "private driver detail" not in failed.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "expected_sqlstate"),
+    [("28p01", "28P01"), ("not a sqlstate", "unavailable"), (None, "unavailable")],
+)
+def test_database_health_logs_only_safe_exception_metadata(
+    monkeypatch, caplog, sqlstate: str | None, expected_sqlstate: str
+):
+    sensitive_markers = (
+        "RAW_DRIVER_MESSAGE_SENTINEL",
+        "DB_HOST_SENTINEL",
+        "DB_USERNAME_SENTINEL",
+        "DB_PASSWORD_SENTINEL",
+        "DB_TOKEN_SENTINEL",
+        "DB_NAME_SENTINEL",
+    )
+    driver_error = Exception(" ".join(sensitive_markers))
+    if sqlstate is not None:
+        driver_error.sqlstate = sqlstate
+
+    class FailingEngine:
+        def connect(self):
+            raise OperationalError("private statement", {}, driver_error)
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test-user:test-password@db.example.invalid/test-db")
+    monkeypatch.setattr(database, "get_database_engine", lambda: FailingEngine())
+    caplog.set_level(logging.WARNING, logger=database.__name__)
+
+    failed = database.check_database_health()
+
+    assert failed.status == "unavailable"
+    assert failed.configured is True and failed.reachable is False
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.name == database.__name__
+    assert record.getMessage() == (
+        "Database health probe failed "
+        f"(exception_class=OperationalError, sqlstate={expected_sqlstate})"
+    )
+    assert record.exc_info is None
+    assert all(marker not in caplog.text for marker in sensitive_markers)
+    assert "test-user" not in caplog.text
+    assert "test-password" not in caplog.text
+    assert "db.example.invalid" not in caplog.text
+    assert "test-db" not in caplog.text
+    assert all(marker not in failed.model_dump_json() for marker in sensitive_markers)
