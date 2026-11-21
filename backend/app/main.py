@@ -4,9 +4,10 @@ import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Path, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -14,6 +15,13 @@ from .analysis import analyze_skills, configured_provider_name, public_provider_
 from .auth import AuthContext, _allowed_origins, _require_csrf, get_auth_context, router as auth_router
 from .error_handlers import request_validation_error_handler, unexpected_error_handler
 from .bias_audit import audit_job
+from .bias_audit_persistence import (
+    delete_bias_audit,
+    get_bias_audit,
+    list_bias_audits,
+    save_bias_audit,
+    update_bias_audit_review,
+)
 from .career_orchestrator import (
     CareerWorkflowStore,
     CareerWorkflowReviewError,
@@ -22,22 +30,32 @@ from .career_orchestrator import (
     review_workflow_run,
 )
 from .learning_pathways import build_learning_pathways
+from .navigation import list_notifications, mark_notification_read, search_account_records
 from .inclusive_matching import build_inclusive_match
 from .impact_measurement import impact_measurement_store
 from .impact_persistence import (
     ImpactReferenceNotFound,
     get_account_impact_summary,
     submit_baseline_observation,
+    submit_candidate_feedback,
     submit_recruiter_feedback,
 )
 from .database import check_database_health, dispose_database_engine, get_db_session
-from .market_intelligence import MarketDataProviderError, market_intelligence_service
+from .db_models import CareerWorkflow
+from .dashboard import get_dashboard_overview
+from .data_management import build_account_export, delete_analysis, delete_workflow, get_account_data
+from .market_intelligence import MarketDataProviderError, MarketDataRateLimitedError, market_intelligence_service
+from .market_adzuna import configured_market_provider
 from .matching import match_job_skills
-from .protections import RateLimitMiddleware, RequestBodyLimitMiddleware
+from .protections import RateLimitMiddleware, RequestBodyLimitMiddleware, SecurityHeadersMiddleware
 from .transferable_skills import build_transferable_skills
 from .models import (
     BiasAuditRequest,
     BiasAuditResponse,
+    BiasAuditReviewUpdateRequest,
+    SavedBiasAuditDetail,
+    SavedBiasAuditListResponse,
+    CareerWorkflowDetailResponse,
     CareerHumanReviewRequest,
     CareerWorkflowRunResponse,
     CareerOrchestrationRequest,
@@ -51,17 +69,24 @@ from .models import (
     ImpactSubmissionResponse,
     ImpactSummaryResponse,
     DatabaseHealthResponse,
+    DashboardOverviewResponse,
     LearningPathwaysRequest,
     LearningPathwaysResponse,
     MarketIntelligenceRequest,
     MarketIntelligenceResponse,
+    MarketProviderStatusResponse,
     SkillsDiscoverResponse,
     SkillsProviderStatusResponse,
     RecruiterImpactFeedbackRequest,
     TransferableSkillsRequest,
     TransferableSkillsResponse,
     PersistedAnalysisResponse,
-    CareerWorkflowListItem,
+    CareerWorkflowSummary,
+    AccountDataResponse,
+    AccountExportResponse,
+    SearchResponse,
+    UserNotificationListResponse,
+    UserNotificationResponse,
 )
 from .provenance import analysis_store
 from .persistence import (
@@ -104,9 +129,11 @@ if not any(isinstance(item, _RedactCareerRunIdAccessLog) for item in _uvicorn_ac
 async def lifespan(_app: FastAPI):
     # Do not require or connect to PostgreSQL at startup; release a lazily
     # created pool only when the application is shutting down.
+    market_intelligence_service.configure_provider(configured_market_provider())
     try:
         yield
     finally:
+        market_intelligence_service.configure_provider(None)
         dispose_database_engine()
 
 
@@ -118,10 +145,77 @@ app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(_allowed_origins()),
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
+app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(auth_router)
+
+
+_PUBLIC_RECORD_ID = r"^[A-Za-z0-9_-]{16,128}$"
+
+
+@app.get("/api/account/data", response_model=AccountDataResponse)
+def account_data_api(
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100_000),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> AccountDataResponse:
+    try:
+        return get_account_data(db, context.user.id, limit=limit, offset=offset)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Account data is temporarily unavailable.") from None
+
+
+@app.get("/api/account/export", response_model=AccountExportResponse)
+def account_export_api(
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    try:
+        export = build_account_export(db, context.user.id)
+        return Response(
+            content=export.model_dump_json(),
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="skillfair-account-export.json"'},
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Account export is temporarily unavailable.") from None
+
+
+@app.delete("/api/account/analyses/{analysis_id}", status_code=204)
+def delete_account_analysis_api(
+    request: Request,
+    analysis_id: str = Path(pattern=_PUBLIC_RECORD_ID),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    _require_csrf(request, context)
+    try:
+        delete_analysis(db, context.user.id, analysis_id)
+        return Response(status_code=204)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="The analysis could not be deleted. Please retry.") from None
+
+
+@app.delete("/api/account/workflows/{workflow_id}", status_code=204)
+def delete_account_workflow_api(
+    request: Request,
+    workflow_id: str = Path(pattern=_PUBLIC_RECORD_ID),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    _require_csrf(request, context)
+    try:
+        delete_workflow(db, context.user.id, workflow_id)
+        return Response(status_code=204)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="The workflow could not be deleted. Please retry.") from None
 
 
 @app.get("/api/health")
@@ -132,6 +226,18 @@ def health() -> dict[str, str]:
 @app.get("/api/health/database", response_model=DatabaseHealthResponse)
 def database_health() -> DatabaseHealthResponse:
     return check_database_health()
+
+
+@app.get("/api/dashboard/overview", response_model=DashboardOverviewResponse)
+def dashboard_overview_api(
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> DashboardOverviewResponse:
+    try:
+        return get_dashboard_overview(db, context.user.id)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Dashboard data is temporarily unavailable.") from None
 
 
 @app.get("/api/skills/provider", response_model=SkillsProviderStatusResponse)
@@ -231,6 +337,79 @@ def audit_job_description(request: BiasAuditRequest) -> BiasAuditResponse:
     return audit_job(request)
 
 
+@app.post("/api/jobs/audits", response_model=SavedBiasAuditDetail)
+def save_job_audit_api(
+    request: BiasAuditRequest,
+    http_request: Request,
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> SavedBiasAuditDetail:
+    _require_csrf(http_request, context)
+    try:
+        return save_bias_audit(db, context.user.id, request)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="The audit could not be saved. Please retry.") from None
+
+
+@app.get("/api/jobs/audits", response_model=SavedBiasAuditListResponse)
+def list_job_audits_api(
+    limit: int = Query(default=20, ge=1, le=30),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> SavedBiasAuditListResponse:
+    return list_bias_audits(db, context.user.id, limit=limit)
+
+
+@app.get("/api/jobs/audits/{audit_id}", response_model=SavedBiasAuditDetail)
+def get_job_audit_api(
+    audit_id: str = Path(pattern=r"^[a-f0-9]{32}$"),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> SavedBiasAuditDetail:
+    result = get_bias_audit(db, context.user.id, audit_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Saved audit was not found.")
+    return result
+
+
+@app.patch("/api/jobs/audits/{audit_id}/findings/{finding_index}", response_model=SavedBiasAuditDetail)
+def update_job_audit_review_api(
+    request: BiasAuditReviewUpdateRequest,
+    http_request: Request,
+    audit_id: str = Path(pattern=r"^[a-f0-9]{32}$"),
+    finding_index: int = Path(ge=0, le=100),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> SavedBiasAuditDetail:
+    _require_csrf(http_request, context)
+    try:
+        result = update_bias_audit_review(db, context.user.id, audit_id, finding_index, request)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="The audit review could not be saved. Please retry.") from None
+    if result is None:
+        raise HTTPException(status_code=404, detail="Saved audit finding was not found.")
+    return result
+
+
+@app.delete("/api/jobs/audits/{audit_id}", status_code=204)
+def delete_job_audit_api(
+    http_request: Request,
+    audit_id: str = Path(pattern=r"^[a-f0-9]{32}$"),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    _require_csrf(http_request, context)
+    try:
+        if not delete_bias_audit(db, context.user.id, audit_id):
+            raise HTTPException(status_code=404, detail="Saved audit was not found.")
+        return Response(status_code=204)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="The audit could not be deleted. Please retry.") from None
+
+
 def learning_pathways(request: LearningPathwaysRequest) -> LearningPathwaysResponse:
     candidate_skills = None
     if request.analysis_id is not None:
@@ -247,11 +426,22 @@ def learning_pathways(request: LearningPathwaysRequest) -> LearningPathwaysRespo
 def market_intelligence(request: MarketIntelligenceRequest) -> MarketIntelligenceResponse:
     try:
         return market_intelligence_service.query(request)
+    except MarketDataRateLimitedError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The configured market-data source is temporarily rate limited. Try again later.",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from None
     except MarketDataProviderError as exc:
         raise HTTPException(
             status_code=502,
             detail="The configured market-data source is unavailable or returned invalid provenance.",
         ) from exc
+
+
+@app.get("/api/market/provider-status", response_model=MarketProviderStatusResponse)
+def market_provider_status() -> MarketProviderStatusResponse:
+    return market_intelligence_service.provider_status()
 
 
 def start_impact_review(run_id: str) -> ImpactSubmissionResponse:
@@ -285,15 +475,17 @@ def submit_recruiter_impact_feedback(
 
 @app.post("/api/impact/feedback/candidate", response_model=ImpactSubmissionResponse)
 def submit_candidate_impact_feedback(
-    _request: CandidateImpactFeedbackRequest,
+    request: CandidateImpactFeedbackRequest,
     http_request: Request,
     context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
 ) -> ImpactSubmissionResponse:
     _require_csrf(http_request, context)
-    raise HTTPException(
-        status_code=410,
-        detail="Persistent candidate feedback is not available until candidate identity or a separately reviewed anonymous-submission design is implemented.",
-    )
+    try:
+        return submit_candidate_feedback(db, context.user.id, request)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Candidate feedback could not be stored. Please retry.") from None
 
 
 @app.post("/api/impact/baseline-observations", response_model=ImpactSubmissionResponse)
@@ -401,6 +593,85 @@ def get_latest_analysis_api(
     return latest_analysis(db, context.user.id)
 
 
+@app.get("/api/skills/analyses/{analysis_id}", response_model=PersistedAnalysisResponse)
+def get_analysis_api(
+    analysis_id: str = Path(pattern=_PUBLIC_RECORD_ID),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> PersistedAnalysisResponse:
+    resolved = resolve_analysis(db, context.user.id, analysis_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Skills analysis was not found.")
+    row, skills = resolved
+    return PersistedAnalysisResponse(
+        analysis_id=row.public_id,
+        analysis_mode=row.analysis_mode,
+        created_at=row.created_at,
+        skills=skills,
+    )
+
+
+@app.get("/api/search", response_model=SearchResponse)
+def account_search_api(
+    q: str = Query(min_length=2, max_length=80),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> SearchResponse:
+    try:
+        return search_account_records(db, context.user.id, q)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Search is temporarily unavailable.") from None
+
+
+@app.get("/api/notifications", response_model=UserNotificationListResponse)
+def account_notifications_api(
+    limit: int = Query(default=20, ge=1, le=50),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> UserNotificationListResponse:
+    try:
+        return list_notifications(db, context.user.id, limit)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Notifications are temporarily unavailable.") from None
+
+
+@app.post("/api/notifications/{notification_id}/read", response_model=UserNotificationResponse)
+def mark_account_notification_read_api(
+    request: Request,
+    notification_id: str = Path(pattern=r"^[A-Fa-f0-9]{32}$"),
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db_session),
+) -> UserNotificationResponse:
+    _require_csrf(request, context)
+    try:
+        row = mark_notification_read(db, context.user.id, notification_id)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="The notification could not be updated.") from None
+    if row is None:
+        raise HTTPException(status_code=404, detail="Notification was not found.")
+    workflow_public_id = None
+    if row.workflow_id is not None:
+        workflow = db.scalar(select(CareerWorkflow.public_id).where(
+            CareerWorkflow.id == row.workflow_id,
+            CareerWorkflow.owner_user_id == context.user.id,
+        ))
+        workflow_public_id = workflow
+    return UserNotificationResponse(
+        notification_id=row.public_id,
+        notification_type=row.notification_type,
+        title=row.title,
+        message=row.message,
+        created_at=row.created_at,
+        read_at=row.read_at,
+        workflow_id=workflow_public_id,
+    )
+
+
 @app.post("/api/jobs/match", response_model=JobMatchResponse)
 def match_job_api(
     request: JobMatchRequest,
@@ -457,12 +728,12 @@ def transferable_skills_api(
     return build_transferable_skills(request, skills)
 
 
-@app.get("/api/career/orchestrator/runs", response_model=list[CareerWorkflowListItem])
+@app.get("/api/career/orchestrator/runs", response_model=list[CareerWorkflowSummary])
 def list_career_workflows_api(
     limit: int = Query(default=20, ge=1, le=30),
     context: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db_session),
-) -> list[CareerWorkflowListItem]:
+) -> list[CareerWorkflowSummary]:
     return list_persisted_workflows(db, context.user.id, limit=limit)
 
 
@@ -482,12 +753,12 @@ def create_career_workflow_api(
     return persist_workflow(db, context.user.id, analysis, request, response)
 
 
-@app.get("/api/career/orchestrator/runs/{run_id}", response_model=CareerWorkflowRunResponse)
+@app.get("/api/career/orchestrator/runs/{run_id}", response_model=CareerWorkflowDetailResponse)
 def get_career_workflow_api(
     run_id: str,
     context: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db_session),
-) -> CareerWorkflowRunResponse:
+) -> CareerWorkflowDetailResponse:
     response = get_persisted_workflow(db, context.user.id, run_id)
     if response is None:
         raise HTTPException(status_code=404, detail="Career workflow was not found.")

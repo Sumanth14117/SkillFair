@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .database import get_db_session
 from .db_models import User, UserSession
-from .models import AuthLoginRequest, AuthRegisterRequest, AuthenticatedUserResponse
+from .models import AuthLoginRequest, AuthRegisterRequest, AuthRegistrationResponse, AuthenticatedUserResponse
 
 
 SESSION_COOKIE_NAME = "skillfair_session"
@@ -188,36 +188,30 @@ def _user_response(user: User) -> AuthenticatedUserResponse:
     return AuthenticatedUserResponse(id=user.id, email=user.email_normalized, created_at=user.created_at)
 
 
-@router.post("/register", response_model=AuthenticatedUserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=AuthRegistrationResponse, status_code=status.HTTP_202_ACCEPTED)
 def register(
     payload: AuthRegisterRequest,
     request: Request,
-    response: Response,
     db: Session = Depends(get_db_session),
-) -> AuthenticatedUserResponse:
+) -> AuthRegistrationResponse:
     _require_allowed_origin(request)
     try:
         email = normalize_email(payload.email)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Enter a valid email address.") from exc
 
-    now = datetime.now(timezone.utc)
     user = User(email_normalized=email, password_hash=_password_hasher.hash(payload.password), is_active=True)
     try:
         db.add(user)
-        db.flush()
-        _revoke_present_session(request, db, now)
-        raw_session, raw_csrf = _new_session(db, user, now)
         db.commit()
-    except IntegrityError as exc:
+    except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Unable to create account. Check the details or sign in.") from exc
     except BaseException:
         db.rollback()
         raise
-
-    _set_session_cookies(response, raw_session, raw_csrf)
-    return _user_response(user)
+    # New and existing addresses receive the same status, body, and cookie
+    # behavior. New users sign in explicitly after registration.
+    return AuthRegistrationResponse()
 
 
 def _verify_password(user: User | None, password: str) -> bool:

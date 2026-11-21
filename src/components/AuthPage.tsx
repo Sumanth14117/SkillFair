@@ -47,7 +47,8 @@ export default function AuthPage({ onLogin, onRegister, serviceError }: Props) {
     try {
       if (mode === 'register') {
         await onRegister(normalizedEmail, password)
-        setSuccess('Your account is ready. Signing you in…')
+        setSuccess('Registration request processed. If the address already has an account, sign in. If it is new, sign in with the password you chose. SkillFair does not send verification email.')
+        setMode('login')
       } else {
         await onLogin(normalizedEmail, password)
       }

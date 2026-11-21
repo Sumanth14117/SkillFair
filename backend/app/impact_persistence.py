@@ -9,11 +9,14 @@ from sqlalchemy import and_, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .db_models import CareerWorkflow, ImpactObservation, RecruiterFeedback, WorkflowReview
+from .db_models import CandidateExperienceFeedback, CareerWorkflow, ImpactObservation, RecruiterFeedback, WorkflowReview
 from .impact_measurement import ImpactMeasurementStore
 from .models import (
     ImpactBaselineObservationRequest,
     ImpactCategory,
+    CandidateImpactFeedbackRequest,
+    ImpactDistributionItem,
+    ImpactQuestionDistribution,
     ImpactSummaryResponse,
     ImpactSubmissionResponse,
     LearningPathwaysResponse,
@@ -27,7 +30,7 @@ _PERSISTENCE_LIMITATION = (
     "Metrics are scoped to the signed-in account and reflect recorded workflow activity or voluntary submissions."
 )
 _CANDIDATE_FEEDBACK_LIMITATION = (
-    "Persistent candidate feedback is unavailable until a candidate identity or separately reviewed anonymous-submission design exists."
+    "Candidate feedback is voluntary and linked to the signed-in account; respondent identity as a candidate is not independently verified, and submissions are not used for hiring decisions."
 )
 
 
@@ -48,6 +51,11 @@ def _prune_expired_owner_measurements(db: Session, owner_id: UUID, now: datetime
         ImpactObservation.expires_at.is_not(None),
         ImpactObservation.expires_at <= now,
     ).execution_options(synchronize_session=False))
+    db.execute(delete(CandidateExperienceFeedback).where(
+        CandidateExperienceFeedback.owner_user_id == owner_id,
+        CandidateExperienceFeedback.expires_at.is_not(None),
+        CandidateExperienceFeedback.expires_at <= now,
+    ).execution_options(synchronize_session=False))
     db.commit()
 
 
@@ -59,7 +67,7 @@ def _utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def _record_submission(db: Session, row: RecruiterFeedback | ImpactObservation, owner_id: UUID, submission_id: UUID, model: type[RecruiterFeedback] | type[ImpactObservation]) -> bool:
+def _record_submission(db: Session, row: RecruiterFeedback | ImpactObservation | CandidateExperienceFeedback, owner_id: UUID, submission_id: UUID, model: type[RecruiterFeedback] | type[ImpactObservation] | type[CandidateExperienceFeedback]) -> bool:
     """Insert atomically; uniqueness makes concurrent retries idempotent."""
     existing = db.scalar(select(model.id).where(model.owner_user_id == owner_id, model.submission_id == submission_id))
     if existing is not None:
@@ -141,6 +149,35 @@ def submit_baseline_observation(
     )
 
 
+def submit_candidate_feedback(
+    db: Session,
+    owner_id: UUID,
+    request: CandidateImpactFeedbackRequest,
+    *,
+    now: datetime | None = None,
+) -> ImpactSubmissionResponse:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    _prune_expired_owner_measurements(db, owner_id, current)
+    row = CandidateExperienceFeedback(
+        owner_user_id=owner_id,
+        submission_id=request.submission_id,
+        consent_to_aggregate=True,
+        application_experience=request.application_experience,
+        process_accessibility=request.process_accessibility,
+        job_requirements_clarity=request.job_requirements_clarity,
+        perceived_fairness=request.perceived_fairness,
+        suggestion_categories=list(request.suggestion_categories),
+        submitted_at=current,
+        expires_at=current + timedelta(days=PERSISTED_MEASUREMENT_RETENTION_DAYS),
+    )
+    created = _record_submission(db, row, owner_id, request.submission_id, CandidateExperienceFeedback)
+    return ImpactSubmissionResponse(
+        duplicate=not created,
+        message=("This candidate feedback submission was already counted for this account." if not created else
+                 "Thank you. Your voluntary feedback is linked to this signed-in account and retained for up to 90 days; free-text comments are not collected."),
+    )
+
+
 def _pathways_confirmed(review: WorkflowReview, workflow_status: str, snapshot: dict[str, object]) -> bool:
     if review.decision != "proceed" or workflow_status != "complete":
         return False
@@ -156,22 +193,46 @@ def _pathways_confirmed(review: WorkflowReview, workflow_status: str, snapshot: 
         return False
 
 
-def _mark_candidate_feedback_unavailable(summary: ImpactSummaryResponse) -> ImpactSummaryResponse:
-    candidate_metrics = [
-        metric.model_copy(update={
-            "value": None,
-            "data_availability": "unavailable",
-            "limitations": [item for item in metric.limitations if "process-local" not in item and "unauthenticated" not in item]
-            + [_CANDIDATE_FEEDBACK_LIMITATION],
-        })
-        if metric.category == "candidate_feedback" else metric
-        for metric in summary.metrics
-    ]
-    distributions = [
-        item.model_copy(update={"value": None, "data_availability": "unavailable"})
-        for item in summary.candidate_rating_distribution
-    ]
-    return summary.model_copy(update={"metrics": candidate_metrics, "candidate_rating_distribution": distributions})
+def _candidate_distributions(rows: list[CandidateExperienceFeedback]) -> tuple[list[ImpactQuestionDistribution], list[ImpactDistributionItem]]:
+    from collections import Counter
+    from .impact_measurement import MINIMUM_FEEDBACK_SAMPLE
+
+    questions = (
+        ("candidate_application_experience", "Application experience", "application_experience"),
+        ("candidate_process_accessibility", "Accessibility of the process", "process_accessibility"),
+        ("candidate_job_requirements_clarity", "Clarity of job requirements", "job_requirements_clarity"),
+        ("candidate_perceived_fairness", "Perceived fairness", "perceived_fairness"),
+    )
+    sample_size = len(rows)
+    availability = "awaiting_data" if sample_size == 0 else "insufficient_sample" if sample_size < MINIMUM_FEEDBACK_SAMPLE else "measured"
+    stamps = [_utc(row.submitted_at) for row in rows]
+    period_start = min(stamp for stamp in stamps if stamp is not None) if stamps else None
+    period_end = max(stamp for stamp in stamps if stamp is not None) if stamps else None
+    distributions: list[ImpactQuestionDistribution] = []
+    for metric_id, name, field in questions:
+        counts = Counter(getattr(row, field) for row in rows)
+        distributions.append(ImpactQuestionDistribution(
+            metric_id=metric_id,
+            name=name,
+            sample_size=sample_size,
+            data_availability=availability,
+            period_start=period_start,
+            period_end=period_end,
+            distribution=[ImpactDistributionItem(
+                label=str(rating),
+                value=counts[rating] if sample_size >= MINIMUM_FEEDBACK_SAMPLE else None,
+                sample_size=sample_size,
+                data_availability=availability,
+            ) for rating in range(1, 6)],
+        ))
+    suggestion_counts = Counter(category for row in rows for category in (row.suggestion_categories or []))
+    suggestions = [ImpactDistributionItem(
+        label=category,
+        value=suggestion_counts[category] if sample_size >= MINIMUM_FEEDBACK_SAMPLE else None,
+        sample_size=sample_size,
+        data_availability=availability,
+    ) for category in ("clarity", "accessibility", "communication", "other")]
+    return distributions, suggestions
 
 
 def get_account_impact_summary(
@@ -210,6 +271,11 @@ def get_account_impact_summary(
         RecruiterFeedback.consent_to_aggregate.is_(True),
         (RecruiterFeedback.expires_at.is_(None)) | (RecruiterFeedback.expires_at > current),
     )).all()
+    candidate_rows = db.scalars(select(CandidateExperienceFeedback).where(
+        CandidateExperienceFeedback.owner_user_id == owner_id,
+        CandidateExperienceFeedback.consent_to_aggregate.is_(True),
+        (CandidateExperienceFeedback.expires_at.is_(None)) | (CandidateExperienceFeedback.expires_at > current),
+    )).all()
     baseline_rows = db.scalars(select(ImpactObservation).where(
         ImpactObservation.owner_user_id == owner_id,
         ImpactObservation.observation_type == "baseline_duration",
@@ -218,7 +284,7 @@ def get_account_impact_summary(
 
     # Reuse the deterministic aggregation rules over this account's database
     # rows only. This short-lived accumulator is not a persistence source.
-    total = len(review_rows) + len(recruiter_rows) + len(baseline_rows)
+    total = len(review_rows) + len(recruiter_rows) + len(candidate_rows) + len(baseline_rows)
     aggregate = ImpactMeasurementStore(max_records=max(1, total + 1))
     for review, workflow_status, pathways_snapshot in review_rows:
         key = str(review.id)
@@ -240,6 +306,13 @@ def get_account_impact_summary(
             "explanation_clarity": row.explanation_clarity,
             "review_ease": row.review_ease,
         }, _utc(row.submitted_at) or current)
+    for row in candidate_rows:
+        aggregate.add_feedback("candidate", row.submission_id, {
+            "application_experience": int(row.application_experience),
+            "process_accessibility": int(row.process_accessibility),
+            "job_requirements_clarity": int(row.job_requirements_clarity),
+            "perceived_fairness": int(row.perceived_fairness),
+        }, _utc(row.submitted_at) or current)
     for row in baseline_rows:
         numeric_value = float(row.numeric_value)
         seconds = int(numeric_value)
@@ -253,29 +326,39 @@ def get_account_impact_summary(
         aggregate.add_baseline(request, _utc(row.created_at) or current)
 
     summary = aggregate.summary(category=category, start_date=start_date, end_date=end_date, now=current)
-    candidate_summary = _mark_candidate_feedback_unavailable(summary)
+    if category in {"all", "candidate_feedback"}:
+        candidate_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc) if start_date else None
+        candidate_end = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc) if end_date else None
+        selected_candidates = [row for row in candidate_rows if
+            (candidate_start is None or _utc(row.submitted_at) >= candidate_start) and
+            (candidate_end is None or _utc(row.submitted_at) < candidate_end)]
+        candidate_distributions, suggestion_distribution = _candidate_distributions(selected_candidates)
+    else:
+        candidate_distributions, suggestion_distribution = [], []
     metrics = [
         metric.model_copy(update={
             "limitations": [
                 item for item in metric.limitations
                 if "unauthenticated" not in item and "process-local" not in item and "30 minutes" not in item
-            ] + [_PERSISTENCE_LIMITATION],
+            ] + [_PERSISTENCE_LIMITATION] + ([_CANDIDATE_FEEDBACK_LIMITATION] if metric.category == "candidate_feedback" else []),
         })
-        for metric in candidate_summary.metrics
+        for metric in summary.metrics
     ]
-    comparison = candidate_summary.baseline_comparison.model_copy(update={
+    comparison = summary.baseline_comparison.model_copy(update={
         "limitations": [
-            item for item in candidate_summary.baseline_comparison.limitations
+            item for item in summary.baseline_comparison.limitations
             if "unauthenticated" not in item and "process-local" not in item
         ] + [_PERSISTENCE_LIMITATION],
     })
-    summary = candidate_summary.model_copy(update={
+    summary = summary.model_copy(update={
         "generated_at": current,
         "pilot_period_label": "Account-scoped pilot · feedback and baseline submissions are reportable for 90 days; workflow history follows workflow retention.",
         "retention_seconds": PERSISTED_MEASUREMENT_RETENTION_SECONDS,
         "dropped_event_count": 0,
         "metrics": metrics,
         "baseline_comparison": comparison,
+        "candidate_feedback_distributions": candidate_distributions,
+        "candidate_suggestion_distribution": suggestion_distribution,
         "disclaimer": (
             "Measurements are aggregate records associated with the signed-in account; they do not establish "
             "fairness, causation, candidate competence, or improved hiring outcomes. "

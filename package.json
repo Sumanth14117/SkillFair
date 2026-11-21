@@ -5,12 +5,28 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc -b --pretty false",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node --experimental-strip-types --test --test-concurrency=1 tests/auth-client.test.mjs tests/api-client.test.mjs tests/auth-session-isolation.test.mjs tests/auth-tab-sync.test.mjs tests/session-persistence.test.mjs tests/workflow-restoration.test.mjs tests/workflow-history.test.mjs tests/job-audit-client.test.mjs tests/bias-audit-persistence.test.mjs tests/candidate-feedback.test.mjs tests/resume-upload.test.mjs tests/recruiter-review.test.mjs tests/impact-measurement.test.mjs tests/impact-measurement-ui.test.mjs tests/market-intelligence.test.mjs tests/overview-dashboard.test.mjs tests/data-management.test.mjs tests/navigation.test.mjs",
     "test:review": "node --test tests/recruiter-review.test.mjs",
     "test:auth": "node --experimental-strip-types --test tests/auth-client.test.mjs",
+    "test:api-client": "node --experimental-strip-types --test tests/api-client.test.mjs",
+    "test:identity": "node --experimental-strip-types --test tests/auth-session-isolation.test.mjs tests/auth-tab-sync.test.mjs",
     "test:session": "node --experimental-strip-types --test tests/session-persistence.test.mjs",
-    "test:impact": "node --experimental-strip-types --test tests/impact-measurement.test.mjs tests/impact-measurement-ui.test.mjs",
+    "test:impact": "node --experimental-strip-types --test tests/impact-measurement.test.mjs tests/impact-measurement-ui.test.mjs tests/candidate-feedback.test.mjs",
+    "test:market": "node --experimental-strip-types --test tests/market-intelligence.test.mjs",
+    "test:dashboard": "node --experimental-strip-types --test tests/overview-dashboard.test.mjs",
+    "test:data": "node --experimental-strip-types --test tests/data-management.test.mjs",
+    "test:navigation": "node --experimental-strip-types --test tests/navigation.test.mjs",
+    "test:workflow-restoration": "node --experimental-strip-types --test tests/workflow-restoration.test.mjs",
+    "test:workflow-history": "node --experimental-strip-types --test tests/workflow-history.test.mjs",
+    "test:job-audit": "node --experimental-strip-types --test tests/job-audit-client.test.mjs",
+    "test:bias-audit": "node --experimental-strip-types --test tests/bias-audit-persistence.test.mjs",
+    "test:resume-upload": "node --experimental-strip-types --test tests/resume-upload.test.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium",
+    "e2e:server": "vite --config vite.e2e.config.ts",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -23,6 +39,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
+    "@playwright/test": "^1.65.1",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
@@ -31,7 +48,7 @@
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.4.0",
     "typescript": "~5.9.2",
-    "typescript-eslint": "^8.44.0",
+    "typescript-eslint": "^8.73.0",
     "vite": "^7.1.7"
   }
 }

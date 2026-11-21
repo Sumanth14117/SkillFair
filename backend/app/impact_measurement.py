@@ -270,14 +270,6 @@ class ImpactMeasurementStore:
             ))
         if category in {"all", "candidate_feedback"}:
             metrics.extend(self._rating_metrics(candidate, "candidate", start, end))
-            candidate_values = [value for event in candidate for _, value in event.ratings]
-            metrics.append(self._metric(
-                "candidate_experience_average", "Candidate experience average", "candidate_feedback",
-                fmean(candidate_values) if len(candidate) >= MINIMUM_FEEDBACK_SAMPLE else None,
-                "rating_1_to_5", len(candidate), start, end,
-                "Arithmetic mean across the four required candidate rating questions; each completed questionnaire is included once per question.", 0,
-                [event.submitted_at for event in candidate],
-            ))
 
         decisions = Counter(item.decision for item in completed if item.decision)
         decision_distribution = [
@@ -287,7 +279,10 @@ class ImpactMeasurementStore:
 
         trend = self._duration_trend(valid_durations) if category in {"all", "operations"} else []
         recruiter_distribution = self._rating_distribution(recruiter) if category in {"all", "recruiter_feedback"} else []
-        candidate_distribution = self._rating_distribution(candidate) if category in {"all", "candidate_feedback"} else []
+        # Candidate dimensions are kept separate in persisted summaries.
+        # The legacy combined distribution field remains empty to avoid implying
+        # that distinct survey questions are interchangeable.
+        candidate_distribution: list[ImpactDistributionItem] = []
         comparison = self._baseline_comparison(valid_durations, selected_baseline, start, end)
         if category not in {"all", "baseline", "operations"}:
             comparison = self._unavailable_comparison()
@@ -356,7 +351,7 @@ class ImpactMeasurementStore:
     def _rating_metrics(cls, events: list[_FeedbackEvent], cohort: str, start: datetime | None, end: datetime | None) -> list[ImpactMetric]:
         names = {
             "recruiter": {"evidence_usefulness": "Evidence usefulness", "explanation_clarity": "Skill explanation clarity", "review_ease": "Ease of review"},
-            "candidate": {"skill_representation_clarity": "Clarity of skill representation", "understanding_of_skills": "Understanding of identified skills", "perceived_transparency": "Perceived transparency", "overall_experience": "Overall candidate experience"},
+            "candidate": {"application_experience": "Application experience", "process_accessibility": "Accessibility of the process", "job_requirements_clarity": "Clarity of job requirements", "perceived_fairness": "Perceived fairness"},
         }[cohort]
         metrics = []
         values = [dict(event.ratings) for event in events]

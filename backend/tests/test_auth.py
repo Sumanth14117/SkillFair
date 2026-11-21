@@ -56,7 +56,11 @@ def _origin_headers(origin: str = ORIGIN) -> dict[str, str]:
 
 
 async def _register(client: httpx.AsyncClient, email: str = EMAIL, password: str = PASSWORD):
-    return await client.post("/api/auth/register", json={"email": email, "password": password}, headers=_origin_headers())
+    response = await client.post("/api/auth/register", json={"email": email, "password": password}, headers=_origin_headers())
+    if response.status_code == 202:
+        login = await client.post("/api/auth/login", json={"email": email, "password": password}, headers=_origin_headers())
+        assert login.status_code == 200
+    return response
 
 
 def _session_for_cookie(engine, raw_token: str) -> UserSession:
@@ -94,7 +98,7 @@ async def test_registration_accepts_configured_localhost_5174_origin(auth_client
             json={"email": EMAIL, "password": PASSWORD},
             headers={"Origin": VITE_ORIGIN},
         )
-    assert response.status_code == 201
+    assert response.status_code == 202
 
 
 @pytest.mark.anyio
@@ -107,7 +111,7 @@ async def test_registration_accepts_configured_127_0_0_1_5174_origin(auth_client
             json={"email": EMAIL, "password": PASSWORD},
             headers={"Origin": origin},
         )
-    assert response.status_code == 201
+    assert response.status_code == 202
 
 
 @pytest.mark.anyio
@@ -150,7 +154,7 @@ async def test_registration_origin_uses_dotenv_after_stale_inherited_value_is_cl
 @pytest.mark.anyio
 async def test_login_accepts_the_configured_vite_5174_origin(auth_client, monkeypatch):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        assert (await _register(client)).status_code == 201
+        assert (await _register(client)).status_code == 202
         monkeypatch.setenv("SKILLFAIR_AUTH_ALLOWED_ORIGINS", VITE_ORIGIN)
         response = await client.post(
             "/api/auth/login",
@@ -169,7 +173,7 @@ async def test_registration_accepts_matching_referer_when_origin_is_absent(auth_
             json={"email": EMAIL, "password": PASSWORD},
             headers={"Referer": f"{VITE_ORIGIN}/signup"},
         )
-    assert response.status_code == 201
+    assert response.status_code == 202
 
 
 @pytest.fixture
@@ -181,8 +185,13 @@ def anyio_backend():
 async def test_registration_normalizes_email_hashes_password_and_sets_secure_cookies(auth_client):
     engine = auth_client
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        response = await _register(client)
-        assert response.status_code == 201
+        registration = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD}, headers=_origin_headers())
+        assert registration.status_code == 202
+        assert registration.json() == {"message": "Registration request processed. If the address already has an account, sign in. No verification email is sent."}
+        assert "set-cookie" not in registration.headers
+        assert "password_hash" not in registration.text
+        response = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD}, headers=_origin_headers())
+        assert response.status_code == 200
         assert response.json()["email"] == "recruiter@example.test"
         assert "skillfair_session" not in response.text
         assert "password_hash" not in response.text
@@ -214,10 +223,13 @@ async def test_registration_normalizes_email_hashes_password_and_sets_secure_coo
 async def test_duplicate_registration_is_controlled_and_does_not_create_another_user(auth_client):
     engine = auth_client
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        assert (await _register(client)).status_code == 201
-        duplicate = await _register(client, " RECRUITER@example.test ")
-        assert duplicate.status_code == 409
-        assert duplicate.json() == {"detail": "Unable to create account. Check the details or sign in."}
+        first = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD}, headers=_origin_headers())
+        duplicate = await client.post("/api/auth/register", json={"email": " RECRUITER@example.test ", "password": PASSWORD}, headers=_origin_headers())
+        assert first.status_code == duplicate.status_code == 202
+        assert first.json() == duplicate.json()
+        assert "set-cookie" not in first.headers and "set-cookie" not in duplicate.headers
+        login = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD}, headers=_origin_headers())
+        assert login.status_code == 200
     with Session(engine) as db:
         assert db.scalar(select(func.count()).select_from(User)) == 1
 
@@ -226,7 +238,7 @@ async def test_duplicate_registration_is_controlled_and_does_not_create_another_
 async def test_successful_login_rotates_the_existing_session_identifier(auth_client):
     engine = auth_client
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        assert (await _register(client)).status_code == 201
+        assert (await _register(client)).status_code == 202
         old_token = client.cookies.get(SESSION_COOKIE_NAME)
         login = await client.post("/api/auth/login", json={"email": "RECRUITER@example.test", "password": PASSWORD}, headers=_origin_headers())
         assert login.status_code == 200
@@ -242,7 +254,7 @@ async def test_successful_login_rotates_the_existing_session_identifier(auth_cli
 @pytest.mark.anyio
 async def test_invalid_login_is_generic_for_unknown_and_incorrect_credentials(auth_client):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        assert (await _register(client)).status_code == 201
+        assert (await _register(client)).status_code == 202
         client.cookies.clear()
         wrong_password = await client.post("/api/auth/login", json={"email": EMAIL, "password": "incorrect password"}, headers=_origin_headers())
         unknown_email = await client.post("/api/auth/login", json={"email": "missing@example.test", "password": "incorrect password"}, headers=_origin_headers())
@@ -254,10 +266,10 @@ async def test_invalid_login_is_generic_for_unknown_and_incorrect_credentials(au
 async def test_current_user_requires_and_validates_a_session(auth_client):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
         assert (await client.get("/api/auth/me")).status_code == 401
-        registered = await _register(client)
+        await _register(client)
         response = await client.get("/api/auth/me")
         assert response.status_code == 200
-        assert response.json()["id"] == registered.json()["id"]
+        assert response.json()["email"] == "recruiter@example.test"
         assert set(response.json()) == {"id", "email", "created_at"}
 
 
@@ -286,7 +298,7 @@ async def test_presented_session_with_unavailable_database_returns_safe_503(auth
 async def test_expired_idle_and_revoked_sessions_are_rejected(auth_client):
     engine = auth_client
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        assert (await _register(client)).status_code == 201
+        assert (await _register(client)).status_code == 202
         token = client.cookies.get(SESSION_COOKIE_NAME)
         session = _session_for_cookie(engine, token)
         with Session(engine) as db:
@@ -297,7 +309,7 @@ async def test_expired_idle_and_revoked_sessions_are_rejected(auth_client):
         assert _session_for_cookie(engine, token).revoked_at is not None
 
         client.cookies.clear()
-        assert (await _register(client, "second@example.test")).status_code == 201
+        assert (await _register(client, "second@example.test")).status_code == 202
         second_token = client.cookies.get(SESSION_COOKIE_NAME)
         second = _session_for_cookie(engine, second_token)
         with Session(engine) as db:
@@ -311,7 +323,7 @@ async def test_expired_idle_and_revoked_sessions_are_rejected(auth_client):
 async def test_absolute_expiry_is_enforced_even_if_idle_expiry_is_future(auth_client):
     engine = auth_client
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        assert (await _register(client)).status_code == 201
+        assert (await _register(client)).status_code == 202
         token = client.cookies.get(SESSION_COOKIE_NAME)
         session = _session_for_cookie(engine, token)
         with Session(engine) as db:
@@ -327,7 +339,7 @@ async def test_absolute_expiry_is_enforced_even_if_idle_expiry_is_future(auth_cl
 async def test_logout_requires_origin_and_matching_double_submit_csrf_then_revokes_session(auth_client, monkeypatch):
     engine = auth_client
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
-        assert (await _register(client)).status_code == 201
+        assert (await _register(client)).status_code == 202
         token = client.cookies.get(SESSION_COOKIE_NAME)
         csrf = client.cookies.get(CSRF_COOKIE_NAME)
 
@@ -362,3 +374,17 @@ async def test_registration_rejects_untrusted_or_missing_origin(auth_client):
         assert (await client.post("/api/auth/register", json=payload)).status_code == 403
     with Session(engine) as db:
         assert db.scalar(select(func.count()).select_from(User)) == 0
+
+
+@pytest.mark.anyio
+async def test_registration_duplicate_is_indistinguishable_and_requires_explicit_login(auth_client):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=auth_test_application), base_url=ORIGIN) as client:
+        first = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD}, headers=_origin_headers())
+        duplicate = await client.post("/api/auth/register", json={"email": EMAIL.upper(), "password": PASSWORD}, headers=_origin_headers())
+        assert first.status_code == duplicate.status_code == 202
+        assert first.json() == duplicate.json()
+        assert "set-cookie" not in first.headers and "set-cookie" not in duplicate.headers
+        assert SESSION_COOKIE_NAME not in client.cookies
+        login = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD}, headers=_origin_headers())
+        assert login.status_code == 200
+        assert client.cookies.get(SESSION_COOKIE_NAME)

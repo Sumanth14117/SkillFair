@@ -3,6 +3,9 @@ import { AlertCircle, AlertTriangle, ArrowRight, Check, CheckCircle2, Compass, F
 import { isValidSessionLocator } from '../sessionState'
 import { getRecruiterReviewViewState } from '../recruiterReview'
 import { skillFairFetch } from '../apiClient'
+import { restoreSavedWorkflow } from '../workflowRestoration'
+import { loadWorkflowHistory, type WorkflowHistoryItem, type WorkflowHistoryState } from '../workflowHistory'
+import WorkflowHistory, { type WorkflowHistoryAction } from './WorkflowHistory'
 import '../styles/career-orchestrator.css'
 
 type StageStatus = 'complete' | 'unavailable' | 'needs_human_review' | 'blocked_pending_review' | 'stopped' | 'error'
@@ -26,7 +29,7 @@ type LearningStage = { status: 'blocked_pending_review' | 'complete' | 'stopped'
 type ImpactTrackingState = 'idle' | 'recording' | 'recorded' | 'unavailable'
 export type CareerWorkflowRun = { run_id: string; started_at: string; workflow_status: 'awaiting_human_review' | 'revise_required' | 'stopped' | 'complete'; stages: Stage[]; skill_passport: Passport; market_intelligence: MarketResult; job_audit: AuditResult; inclusive_matching: InclusiveResult; human_review: HumanReview; learning_pathways: LearningStage; workflow_summary: string; disclaimers: string[] }
 export type CareerWorkflowDraft = { jobTitle: string; jobDescription: string; geography: string; essentialSkills: string; preferredSkills: string }
-export type CareerOrchestratorProps = { analysisId: string | null; run: CareerWorkflowRun | null; runId: string | null; onRunChange: (run: CareerWorkflowRun | null) => void; onRunExpired: (runId: string) => void; onAnalysisExpired: () => void; draft: CareerWorkflowDraft; onDraftChange: (draft: CareerWorkflowDraft) => void; onSkillsDiscovery: () => void; mode?: 'orchestrator' | 'review'; onOpenOrchestrator?: () => void }
+export type CareerOrchestratorProps = { ownerId: string; analysisId: string | null; run: CareerWorkflowRun | null; runId: string | null; onRunChange: (run: CareerWorkflowRun | null) => void; onRunExpired: (runId: string) => void; onAnalysisExpired: () => void; draft: CareerWorkflowDraft; onDraftChange: (draft: CareerWorkflowDraft) => void; onSkillsDiscovery: () => void; mode?: 'orchestrator' | 'review'; onOpenOrchestrator?: () => void }
 type ErrorKind = 'validation' | 'network' | 'analysis_expired' | 'run_expired' | 'service' | 'conflict'
 
 const STAGE_LABELS: Record<StageName, string> = {
@@ -82,7 +85,7 @@ async function postJson<T>(url: string, payload: unknown, action: 'create' | 're
   return body
 }
 
-function verifyRun(value: CareerWorkflowRun): CareerWorkflowRun {
+export function verifyRun(value: CareerWorkflowRun): CareerWorkflowRun {
   if (!isValidSessionLocator(value.run_id) || !Array.isArray(value.stages) || !value.skill_passport || !value.market_intelligence || !value.job_audit || !value.inclusive_matching || !value.human_review || !value.learning_pathways || typeof value.workflow_summary !== 'string' || !Array.isArray(value.disclaimers)) {
     throw Object.assign(new Error('The service returned an unsupported workflow response. Please try again.'), { kind: 'service' as ErrorKind })
   }
@@ -197,7 +200,7 @@ function WorkflowRunView({ run, selected, onToggle, onReview, loading, notes, on
   </div>
 }
 
-export default function CareerOrchestrator({ analysisId, run, runId, onRunChange, onRunExpired, onAnalysisExpired, draft, onDraftChange, onSkillsDiscovery, mode = 'orchestrator', onOpenOrchestrator }: CareerOrchestratorProps) {
+export default function CareerOrchestrator({ ownerId, analysisId, run, runId, onRunChange, onRunExpired, onAnalysisExpired, draft, onDraftChange, onSkillsDiscovery, mode = 'orchestrator', onOpenOrchestrator }: CareerOrchestratorProps) {
   const [editing, setEditing] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
   const [reviewNotes, setReviewNotes] = useState('')
@@ -206,7 +209,12 @@ export default function CareerOrchestrator({ analysisId, run, runId, onRunChange
   const [impactTracking, setImpactTracking] = useState<ImpactTrackingState>('idle')
   const [restoreState, setRestoreState] = useState<'idle' | 'loading' | 'error'>(runId ? 'loading' : 'idle')
   const inFlight = useRef(false)
-  const firstRender = useRef(true)
+  const ownerIdRef = useRef(ownerId)
+  ownerIdRef.current = ownerId
+  const [historyState, setHistoryState] = useState<WorkflowHistoryState>({ status: 'loading' })
+  const [historyRefresh, setHistoryRefresh] = useState(0)
+  const [historyAction, setHistoryAction] = useState<WorkflowHistoryAction>(null)
+  const historyActionController = useRef<AbortController | null>(null)
   const essentialSkills = parseList(draft.essentialSkills)
   const preferredSkills = parseList(draft.preferredSkills)
   const reviewMode = mode === 'review'
@@ -267,13 +275,38 @@ export default function CareerOrchestrator({ analysisId, run, runId, onRunChange
   }
 
   useEffect(() => {
-    if (!runId) { firstRender.current = false; return }
-    const shouldRestore = firstRender.current || run?.run_id !== runId
-    firstRender.current = false
-    if (shouldRestore) void restoreRun(runId)
+    if (!runId) {
+      setRestoreState('idle')
+      return
+    }
+    if (run?.run_id === runId) {
+      setRestoreState('idle')
+      setSelected([])
+      setReviewNotes('')
+      return
+    }
+    void restoreRun(runId)
     // Restore only from the server; the browser stores the locator, never a workflow body.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, run?.run_id])
+
+  useEffect(() => {
+    if (reviewMode) return
+    const expectedOwnerId = ownerId
+    const controller = new AbortController()
+    let active = true
+    setHistoryState({ status: 'loading' })
+    void loadWorkflowHistory(expectedOwnerId, () => ownerIdRef.current, skillFairFetch, controller.signal)
+      .then((result) => { if (active && result) setHistoryState(result) })
+      .catch(() => {
+        if (active && !controller.signal.aborted && ownerIdRef.current === expectedOwnerId) {
+          setHistoryState({ status: 'error', message: 'Saved workflows could not be loaded. Check your connection and retry.' })
+        }
+      })
+    return () => { active = false; controller.abort() }
+  }, [ownerId, reviewMode, historyRefresh])
+
+  useEffect(() => () => { historyActionController.current?.abort() }, [])
 
   function updateDraft(key: keyof CareerWorkflowDraft, value: string) {
     onDraftChange({ ...draft, [key]: value })
@@ -295,7 +328,7 @@ export default function CareerOrchestrator({ analysisId, run, runId, onRunChange
     try {
       const response = await postJson<CareerWorkflowRun>('/api/career/orchestrator/runs', payload, 'create')
       const verified = verifyRun(response)
-      onRunChange(verified); setSelected([]); setReviewNotes(''); setEditing(false); setRestoreState('idle')
+      onRunChange(verified); setSelected([]); setReviewNotes(''); setEditing(false); setRestoreState('idle'); setHistoryRefresh((value) => value + 1)
     } catch (reason) { const failure = reason as Error & { kind?: ErrorKind }; if (failure.kind === 'analysis_expired') onAnalysisExpired(); setError({ kind: failure.kind ?? 'service', message: failure.message || 'The workflow could not be created.' }) }
     finally { inFlight.current = false; setLoading(null) }
   }
@@ -308,6 +341,7 @@ export default function CareerOrchestrator({ analysisId, run, runId, onRunChange
       const response = await postJson<CareerWorkflowRun>(`/api/career/orchestrator/runs/${encodeURIComponent(run.run_id)}/review`, payload, 'review')
       const verified = verifyRun(response)
       onRunChange(verified)
+      setHistoryRefresh((value) => value + 1)
       if (decision === 'revise') setEditing(true)
     } catch (reason) { const failure = reason as Error & { kind?: ErrorKind }; setError({ kind: failure.kind ?? 'service', message: failure.message || 'The review decision could not be recorded.' }) }
     finally { inFlight.current = false; setLoading(null) }
@@ -316,9 +350,50 @@ export default function CareerOrchestrator({ analysisId, run, runId, onRunChange
   function startNew() { onRunChange(null); setSelected([]); setReviewNotes(''); setError(null); setEditing(false) }
   function toggleRequirement(id: string) { setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]); setError(null) }
 
+  async function continueSavedWorkflow(item: WorkflowHistoryItem) {
+    if (historyAction?.status === 'loading') return
+    historyActionController.current?.abort()
+    const controller = new AbortController()
+    historyActionController.current = controller
+    const expectedOwnerId = ownerId
+    setHistoryAction({ runId: item.run_id, status: 'loading' })
+    try {
+      const result = await restoreSavedWorkflow(item.run_id, skillFairFetch, controller.signal)
+      if (controller.signal.aborted || ownerIdRef.current !== expectedOwnerId) return
+      if (result.kind !== 'restored') {
+        if (item.run_id === runId) {
+          onRunExpired(item.run_id)
+          onRunChange(null)
+          setRestoreState('idle')
+        }
+        setHistoryAction({ runId: item.run_id, status: 'error', message: 'This workflow is no longer available to this account. It was not replaced with another workflow.' })
+        return
+      }
+      onRunChange(result.run)
+      onDraftChange({
+        jobTitle: result.workflowInputs.job_title,
+        jobDescription: result.workflowInputs.job_description,
+        geography: result.workflowInputs.geography ?? '',
+        essentialSkills: result.workflowInputs.essential_skills.join('\n'),
+        preferredSkills: result.workflowInputs.preferred_skills.join('\n'),
+      })
+      setSelected([])
+      setReviewNotes('')
+      setEditing(false)
+      setError(null)
+      setRestoreState('idle')
+      setHistoryAction(null)
+    } catch {
+      if (controller.signal.aborted || ownerIdRef.current !== expectedOwnerId) return
+      setHistoryAction({ runId: item.run_id, status: 'error', message: 'Could not retrieve this workflow. Retry this same workflow when the service is available.' })
+    }
+  }
+
   return <div className="career-page">
     <header className="career-heading"><div><span className="eyebrow"><span className="eyebrow-line" /> {reviewMode ? 'SKILLFAIR HUMAN REVIEW' : 'SKILLFAIR CAREER WORKFLOW'}</span><h1>{reviewMode ? 'Review workspace' : 'Career Orchestrator'}</h1><p>{reviewMode ? 'Inspect the current workflow, supporting evidence, and human review state.' : 'Coordinate a skills-first review from candidate evidence to human-guided learning.'}</p></div><span className="career-heading-pill"><Workflow size={16} />Evidence · context · oversight</span></header>
     <div className="career-principles"><span><ShieldCheck size={15} />Evidence-backed</span><span><Globe2 size={15} />Source-aware</span><span><UsersRound size={15} />Recruiter-led</span><p>No candidate ranking or automatic hiring decisions.</p></div>
+
+    {!reviewMode && <WorkflowHistory state={historyState} action={historyAction} onRefresh={() => setHistoryRefresh((value) => value + 1)} onContinue={(item) => void continueSavedWorkflow(item)} />}
 
     {!reviewMode && !analysisId && <div className="career-missing-analysis" role="status"><div><AlertCircle size={19} /></div><span><b>Skills Discovery is required first</b><small>The orchestrator needs an analysis ID to retrieve validated evidence. It does not accept skill records or resume excerpts from this form.</small></span><button type="button" className="button-primary" onClick={onSkillsDiscovery}>Open Skills Discovery <ArrowRight size={14} /></button></div>}
     <div className="career-workspace">

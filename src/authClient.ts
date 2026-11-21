@@ -25,7 +25,8 @@ const SAFE_MESSAGES: Record<number, string> = {
   409: 'Unable to create the account. Check the details or sign in.',
   429: 'Too many authentication attempts. Wait a moment and try again.',
 }
-const AUTH_REQUEST_TIMEOUT_MS = 12_000
+const AUTH_REQUEST_TIMEOUT_MS = 90_000
+const REQUEST_TIMEOUT_MESSAGE = 'SkillFair is taking longer to respond than expected and may be waking from idle. The request was not automatically retried; check whether an action completed before submitting it again.'
 const SAFE_BACKEND_DETAILS = new Set([
   'Invalid email or password.',
   'Unable to create account. Check the details or sign in.',
@@ -63,7 +64,7 @@ async function requestWithTimeout<T>(
     return await consume(response)
   } catch (error) {
     if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
-      throw new AuthApiError('The authentication request timed out. Please try again.', 0)
+      throw new AuthApiError(REQUEST_TIMEOUT_MESSAGE, 0)
     }
     if (error instanceof AuthApiError) throw error
     throw new AuthApiError('Could not reach SkillFair. Check your connection and try again.', 0)
@@ -103,16 +104,28 @@ function jsonRequest(email: string, password: string): RequestInit {
 
 const currentUserRequests = new WeakMap<typeof fetch, Promise<AuthUser>>()
 
-export function getCurrentUser(fetcher: typeof fetch = fetch): Promise<AuthUser> {
+export function getCurrentUser(fetcher: typeof fetch = fetch, force = false): Promise<AuthUser> {
   const existing = currentUserRequests.get(fetcher)
-  if (existing) return existing
-  const pending = requestUser('/api/auth/me', { method: 'GET' }, fetcher).finally(() => currentUserRequests.delete(fetcher))
+  if (existing && !force) return existing
+  const pending = requestUser('/api/auth/me', { method: 'GET' }, fetcher).finally(() => {
+    if (currentUserRequests.get(fetcher) === pending) currentUserRequests.delete(fetcher)
+  })
   currentUserRequests.set(fetcher, pending)
   return pending
 }
 
-export function registerAccount(email: string, password: string, fetcher: typeof fetch = fetch): Promise<AuthUser> {
-  return requestUser('/api/auth/register', jsonRequest(email, password), fetcher)
+export function registerAccount(email: string, password: string, fetcher: typeof fetch = fetch): Promise<void> {
+  return requestWithTimeout('/api/auth/register', jsonRequest(email, password), fetcher, async (response) => {
+    if (!response.ok) throw await responseError(response)
+    let payload: unknown
+    try { payload = await response.json() } catch {
+      throw new AuthApiError('The authentication service returned an unexpected response.', response.status)
+    }
+    if (response.status !== 202 || !payload || typeof payload !== 'object' || !('message' in payload)
+      || payload.message !== 'Registration request processed. If the address already has an account, sign in. No verification email is sent.') {
+      throw new AuthApiError('The authentication service returned an unexpected response.', response.status)
+    }
+  })
 }
 
 export function loginAccount(email: string, password: string, fetcher: typeof fetch = fetch): Promise<AuthUser> {

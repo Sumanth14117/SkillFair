@@ -81,6 +81,59 @@ def test_curated_adjacent_capability_is_distinct_from_exact_match(monkeypatch):
     assert unrelated.candidate_evidence == []
 
 
+def test_fastapi_can_be_a_cautious_adjacent_signal_for_rest_apis():
+    stored = [
+        evidence("Python", "Built a command-line utility in Python."),
+        evidence("SQL", "Queried records using SQL."),
+        evidence("PostgreSQL", "Stored application records in PostgreSQL."),
+        evidence("FastAPI", "Implemented an endpoint using FastAPI."),
+        evidence("Git", "Tracked code changes in Git."),
+    ]
+    result = build_transferable_skills(request(
+        source_role="L1 Technical Support Engineer",
+        target_role="Junior Backend Developer",
+        target_requirements=[
+            "SQL", "REST APIs", "PostgreSQL", "FastAPI", "Problem-solving",
+            "Application troubleshooting", "Incident management",
+        ],
+    ), stored)
+
+    assert [item.status for item in result.results] == [
+        "exact_match", "potential_transfer", "exact_match", "exact_match",
+        "not_evidenced", "not_evidenced", "not_evidenced",
+    ]
+    rest_api = result.results[1]
+    assert rest_api.candidate_evidence[0].skill_name == "FastAPI"
+    assert rest_api.candidate_evidence[0].supporting_excerpt == "Implemented an endpoint using FastAPI."
+    assert rest_api.candidate_evidence[0].relationship_type == "curated_adjacent_capability"
+    assert "does not establish REST design" in rest_api.candidate_evidence[0].explanation
+    assert "not an equivalent skill" in rest_api.candidate_evidence[0].explanation
+    # The stated source skills and target requirements contain three exact labels;
+    # the REST APIs result is a separate potential transfer, not a fourth exact match.
+    assert sum(item.status == "exact_match" for item in result.results) == 3
+    assert sum(item.status == "potential_transfer" for item in result.results) == 1
+
+
+def test_transferability_normalization_deduplicates_equivalent_target_labels():
+    result = build_transferable_skills(request(
+        target_requirements=["REST APIs", "rest   APIs", "REST-APIs"],
+    ), [evidence("FastAPI", "Implemented an endpoint using FastAPI.")])
+
+    assert len(result.results) == 1
+    assert result.results[0].target_requirement == "REST APIs"
+    assert result.results[0].status == "potential_transfer"
+
+
+def test_fastapi_relationship_does_not_imply_general_troubleshooting_or_incident_management():
+    result = build_transferable_skills(request(
+        target_requirements=["Application troubleshooting", "Incident management", "Problem-solving"],
+    ), [evidence("FastAPI", "Implemented an endpoint using FastAPI.")])
+
+    assert all(item.status == "not_evidenced" for item in result.results)
+    assert all(item.candidate_evidence == [] for item in result.results)
+    assert all("does not prove the person lacks" in item.explanation for item in result.results)
+
+
 def test_missing_evidence_is_not_described_as_lacking_a_skill(monkeypatch):
     store = AnalysisStore()
     analysis_id = store.create([evidence("Customer Support", "Resolved customer issues.")])

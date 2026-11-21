@@ -109,6 +109,40 @@ def test_experience_audit_requires_a_high_threshold_and_hard_gate(criterion, sho
         assert findings[0].human_review_required is True
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Minimum 8 years of continuous professional experience.",
+        "No employment gaps during the last five years.",
+        "No career breaks permitted.",
+        "The role requires an uninterrupted employment history.",
+    ],
+)
+def test_audit_flags_explicit_employment_continuity_restrictions(description):
+    result = audit(description)
+
+    finding = next(item for item in result.findings if item.rule_id == "BA-EXPERIENCE-CONTINUITY-001")
+    assert finding.category == "experience_threshold"
+    assert finding.priority == "medium"
+    assert finding.human_review_required is True
+    assert "career-returning candidates" in finding.explanation
+    assert "relevant skills" in finding.suggested_revision_or_action
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Minimum 8 years of professional experience.",
+        "Three years of experience required.",
+        "Career breaks are acceptable and will not disqualify applicants.",
+    ],
+)
+def test_audit_does_not_flag_ordinary_experience_or_permissive_break_language(description):
+    result = audit(description)
+
+    assert not any(item.rule_id == "BA-EXPERIENCE-CONTINUITY-001" for item in result.findings)
+
+
 def test_description_headings_distinguish_essential_from_preferred():
     result = audit(
         "Required qualifications:\nBachelor's degree required\n"

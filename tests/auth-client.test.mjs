@@ -40,6 +40,22 @@ test('concurrent session restoration calls share one request', async () => {
   assert.deepEqual(await Promise.all([first, second]), [user, user])
 })
 
+test('forced cross-tab revalidation supersedes a pending current-user request safely', async () => {
+  const pending = []
+  const fetcher = () => new Promise((resolve) => pending.push(resolve))
+  const oldRequest = getCurrentUser(fetcher)
+  const freshRequest = getCurrentUser(fetcher, true)
+  assert.notEqual(oldRequest, freshRequest)
+  assert.equal(pending.length, 2)
+
+  pending[0](jsonResponse({ ...user, id: 'account-a' }))
+  assert.equal((await oldRequest).id, 'account-a')
+  assert.equal(getCurrentUser(fetcher), freshRequest)
+
+  pending[1](jsonResponse({ ...user, id: 'account-b' }))
+  assert.equal((await freshRequest).id, 'account-b')
+})
+
 test('unauthenticated session restoration returns a controlled 401 error', async () => {
   await assert.rejects(
     getCurrentUser(async () => jsonResponse({ detail: 'Authentication required.' }, 401)),
@@ -52,22 +68,45 @@ test('aborted authentication requests receive a safe timeout message', async () 
   abortError.name = 'AbortError'
   await assert.rejects(
     getCurrentUser(async () => { throw abortError }),
-    (error) => error instanceof AuthApiError && error.status === 0 && error.message === 'The authentication request timed out. Please try again.',
+    (error) => error instanceof AuthApiError && error.status === 0 && error.message.includes('may be waking from idle') && error.message.includes('not automatically retried'),
   )
+})
+
+test('a timed-out registration is not automatically retried and explains cold-start recovery', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  let timeoutCallback
+  let calls = 0
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay === 90_000) { timeoutCallback = callback; return 71 }
+    return realSetTimeout(callback, delay, ...args)
+  }
+  globalThis.clearTimeout = (id) => id === 71 ? undefined : realClearTimeout(id)
+  try {
+    const pending = registerAccount('recruiter@example.test', 'sample-safe-password', async (_url, options) => {
+      calls += 1
+      return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }))
+    })
+    timeoutCallback()
+    await assert.rejects(pending, (error) => error instanceof AuthApiError && error.message.includes('may be waking from idle'))
+    assert.equal(calls, 1)
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
 })
 
 test('registration posts credentials without storing or returning session tokens', async () => {
   let request
   const result = await registerAccount('recruiter@example.test', 'sample-safe-password', async (url, options) => {
     request = { url, options }
-    return jsonResponse(user, 201)
+    return jsonResponse({ message: 'Registration request processed. If the address already has an account, sign in. No verification email is sent.' }, 202)
   })
   assert.equal(request.url, '/api/auth/register')
   assert.equal(request.options.credentials, 'include')
   assert.equal(request.options.headers['Content-Type'], 'application/json')
   assert.deepEqual(JSON.parse(request.options.body), { email: 'recruiter@example.test', password: 'sample-safe-password' })
-  assert.deepEqual(result, user)
-  assert.equal('session_token' in result, false)
+  assert.equal(result, undefined)
 })
 
 test('login sends credentials with cookie support', async () => {

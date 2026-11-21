@@ -15,7 +15,7 @@ const { getDurationTrendEmptyState } = await vite.ssrLoadModule('/src/impactMeas
 const { AuthContext } = await vite.ssrLoadModule('/src/authContext.ts')
 after(async () => { await vite.close() })
 
-test('impact dashboard discloses authenticated account-scoped persistence and candidate feedback limitation', () => {
+test('impact dashboard presents account-linked candidate feedback with explicit privacy disclosure', () => {
   const auth = {
     user: { id: 'test-account-a', email: 'reviewer@example.test', created_at: '2026-01-01T00:00:00Z' },
     status: 'authenticated', error: null,
@@ -24,9 +24,12 @@ test('impact dashboard discloses authenticated account-scoped persistence and ca
   const html = renderToStaticMarkup(createElement(AuthContext.Provider, { value: auth }, createElement(ImpactMeasurement)))
   assert.match(html, /Loading aggregate measurements/)
   assert.match(html, /account-scoped pilot measurements/i)
-  assert.match(html, /scoped to your signed-in account/i)
-  assert.match(html, /candidate feedback is not available/i)
-  assert.match(html, /No resumes, evidence excerpts or free-text comments/i)
+  assert.match(html, /associated with your signed-in account/i)
+  assert.match(html, /candidate feedback is not anonymous/i)
+  assert.match(html, /does not independently verify that a respondent is a candidate/i)
+  assert.match(html, /No free-text comments are collected/i)
+  assert.match(html, /How clear were the job requirements/i)
+  assert.match(html, /I voluntarily agree that these ratings and selected themes may be linked/i)
   assert.doesNotMatch(html, /Jordan Lee|Samira Khan|Marcus Reed|95%|1,284/)
 })
 

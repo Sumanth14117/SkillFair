@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, Check, ChevronDown, FileText, LoaderCircle, LockKeyhole, ShieldCheck, Sparkles, UploadCloud, X } from 'lucide-react'
 import type { SkillEvidence, SkillsDiscoveryResult } from '../types/skills'
-import { csrfTokenFromCookie } from '../authClient'
+import { uploadResume } from '../resumeUpload'
 
 type Props = {
   onContinue: () => void
@@ -16,35 +16,6 @@ function providerLabel(provider: ProviderStatus['provider'] | undefined) {
   if (provider === 'gemini') return 'Google Gemini'
   if (provider === 'groq') return 'Groq'
   return 'an external AI provider'
-}
-
-function discover(file: File, analysisMode: 'local' | 'ai', consentToAIProvider: boolean, consentedProvider: 'gemini' | 'groq' | undefined, onProgress: (value: number) => void): Promise<SkillsDiscoveryResult> {
-  return new Promise((resolve, reject) => {
-    const request = new XMLHttpRequest()
-    request.open('POST', '/api/skills/discover')
-    request.withCredentials = true
-    const csrfToken = csrfTokenFromCookie()
-    if (!csrfToken) { reject(new Error('The security token is missing. Refresh the page and try again.')); return }
-    request.setRequestHeader('X-CSRF-Token', csrfToken)
-    request.upload.onprogress = (event) => {
-      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100))
-    }
-    request.upload.onload = () => onProgress(100)
-    request.onerror = () => reject(new Error('Could not reach the Skills Discovery service. Check that the backend is running.'))
-    request.onload = () => {
-      let body: { detail?: string } & Partial<SkillsDiscoveryResult>
-      try { body = JSON.parse(request.responseText) as typeof body } catch { reject(new Error('The service returned an unreadable response.')); return }
-      if (request.status < 200 || request.status >= 300) { reject(new Error(body.detail ?? 'Resume analysis failed. Please try again.')); return }
-      if (typeof body.analysis_id !== 'string' || !body.analysis_id) { reject(new Error('The service did not return an analysis reference. Please retry Skills Discovery.')); return }
-      resolve(body as SkillsDiscoveryResult)
-    }
-    const form = new FormData()
-    form.append('file', file)
-    form.append('analysis_mode', analysisMode)
-    form.append('consent_to_ai_provider', String(consentToAIProvider))
-    if (consentToAIProvider && consentedProvider) form.append('consented_ai_provider', consentedProvider)
-    request.send(form)
-  })
 }
 
 function SkillCard({ skill }: { skill: SkillEvidence }) {
@@ -68,6 +39,14 @@ export default function SkillsDiscovery({ onContinue, onAnalysisReady, restoredA
   const [analysisMode, setAnalysisMode] = useState<'local' | 'ai'>('local')
   const [providerConsent, setProviderConsent] = useState(false)
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null)
+  const uploadController = useRef<AbortController | null>(null)
+  const uploadRequestId = useRef(0)
+
+  useEffect(() => () => {
+    uploadRequestId.current += 1
+    uploadController.current?.abort()
+    uploadController.current = null
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -104,20 +83,29 @@ export default function SkillsDiscovery({ onContinue, onAnalysisReady, restoredA
     setResult(null)
     setProgress(0)
     setPhase('uploading')
+    const requestId = ++uploadRequestId.current
+    const controller = new AbortController()
+    uploadController.current = controller
+    const isCurrent = () => uploadRequestId.current === requestId && !controller.signal.aborted
     try {
       const consentedProvider = providerStatus?.provider === 'gemini' || providerStatus?.provider === 'groq' ? providerStatus.provider : undefined
-      const response = await discover(file, analysisMode, analysisMode === 'ai' && providerConsent, consentedProvider, (value) => {
+      const response = await uploadResume(file, analysisMode, analysisMode === 'ai' && providerConsent, consentedProvider, (value) => {
+        if (!isCurrent()) return
         setProgress(value)
         if (value >= 100) setPhase('analyzing')
-      })
+      }, controller.signal)
+      if (!isCurrent()) return
       onAnalysisReady(response.analysis_id, response.skills.length, response.analysis_mode, response.skills)
       setResult(response)
       setProgress(100)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Resume analysis failed. Please try again.')
+      if (isCurrent()) setError(reason instanceof Error ? reason.message : 'Resume analysis failed. Please try again.')
     } finally {
-      setPhase('idle')
-      setProviderConsent(false)
+      if (uploadRequestId.current === requestId) {
+        uploadController.current = null
+        setPhase('idle')
+        setProviderConsent(false)
+      }
     }
   }
 

@@ -194,6 +194,7 @@ def create_workflow_run(
             job_title=request.job_title,
             geography=request.geography,
             data_availability="unavailable",
+            freshness="not_available",
             sources=[],
             insights=[],
             message="The configured market-data provider failed. No verified market insights are available for this workflow.",

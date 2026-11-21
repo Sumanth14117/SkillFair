@@ -24,5 +24,6 @@ export const sections = [
   { name: 'Transferable Skills', icon: 'ArrowLeftRight' },
   { name: 'Career Orchestrator', icon: 'BriefcaseBusiness' },
   { name: 'Inclusive Matching', icon: 'UsersRound' }, { name: 'Bias Audit', icon: 'ScanSearch' },
-  { name: 'Recruiter Review', icon: 'ClipboardCheck' },
+  { name: 'Recruiter Review', icon: 'ClipboardCheck' }, { name: 'Data Management', icon: 'Database' },
+  { name: 'Settings', icon: 'Settings' }, { name: 'Help Center', icon: 'CircleHelp' },
 ]

@@ -143,17 +143,22 @@ def test_feedback_validation_duplicate_protection_and_separate_aggregates():
 def test_candidate_feedback_requires_explicit_consent_and_comment_is_not_a_supported_field():
     base = {
         "submission_id": str(uuid4()), "consent_to_aggregate": True,
-        "skill_representation_clarity": 5, "understanding_of_skills": 4,
-        "perceived_transparency": 4, "overall_experience": 5,
+        "application_experience": 5, "process_accessibility": 4,
+        "job_requirements_clarity": 4, "perceived_fairness": 5,
+        "suggestion_categories": ["clarity"],
     }
     request = CandidateImpactFeedbackRequest.model_validate(base)
-    assert request.overall_experience == 5
+    assert request.application_experience == 5
     with pytest.raises(ValidationError):
         CandidateImpactFeedbackRequest.model_validate({**base, "consent_to_aggregate": False})
     with pytest.raises(ValidationError):
-        CandidateImpactFeedbackRequest.model_validate({**base, "overall_experience": 6})
+        CandidateImpactFeedbackRequest.model_validate({**base, "perceived_fairness": 6})
     with pytest.raises(ValidationError):
         CandidateImpactFeedbackRequest.model_validate({**base, "comment": "private personal details"})
+    with pytest.raises(ValidationError):
+        CandidateImpactFeedbackRequest.model_validate({**base, "suggestion_categories": ["clarity", "clarity"]})
+    with pytest.raises(ValidationError):
+        CandidateImpactFeedbackRequest.model_validate({**base, "suggestion_categories": ["other_value"]})
 
 
 def test_category_and_date_filters_limit_aggregates():
@@ -258,10 +263,10 @@ def test_feedback_routes_return_only_submission_receipts_and_aggregate_values(mo
     assert store.add_feedback("recruiter", request.submission_id, ratings, BASE) is False
 
     candidate = CandidateImpactFeedbackRequest(
-        submission_id=uuid4(), consent_to_aggregate=True, skill_representation_clarity=5,
-        understanding_of_skills=4, perceived_transparency=4, overall_experience=5,
+        submission_id=uuid4(), consent_to_aggregate=True, application_experience=5,
+        process_accessibility=4, job_requirements_clarity=4, perceived_fairness=5,
     )
-    candidate_ratings = candidate.model_dump(include={"skill_representation_clarity", "understanding_of_skills", "perceived_transparency", "overall_experience"})
+    candidate_ratings = candidate.model_dump(include={"application_experience", "process_accessibility", "job_requirements_clarity", "perceived_fairness"})
     assert store.add_feedback("candidate", candidate.submission_id, candidate_ratings, BASE) is True
     summary = store.summary(now=BASE + timedelta(seconds=1))
     assert {metric.category for metric in summary.metrics} >= {"recruiter_feedback", "candidate_feedback"}

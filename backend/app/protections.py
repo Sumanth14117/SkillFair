@@ -58,14 +58,18 @@ class InMemoryRateLimiter:
         window_seconds: int = RATE_WINDOW_SECONDS,
         max_entries: int = MAX_TRACKED_CLIENT_BUCKETS,
         clock: Callable[[], float] = time.monotonic,
+        feedback_limit: int = 10,
+        market_limit: int = 10,
     ) -> None:
-        if min(default_limit, discovery_limit, orchestrator_limit, auth_limit, window_seconds, max_entries) <= 0:
+        if min(default_limit, discovery_limit, orchestrator_limit, auth_limit, feedback_limit, market_limit, window_seconds, max_entries) <= 0:
             raise ValueError("rate limiter settings must be positive")
         self._limits = {
             "default": default_limit,
             "discovery": discovery_limit,
             "orchestrator": orchestrator_limit,
             "auth": auth_limit,
+            "feedback": feedback_limit,
+            "market": market_limit,
         }
         self._window_seconds = window_seconds
         self._max_entries = max_entries
@@ -113,12 +117,16 @@ class InMemoryRateLimiter:
 
 def _request_group(path: str) -> str:
     path = path.rstrip("/") or "/"
+    if path.startswith("/api/impact/feedback/") or path.startswith("/api/jobs/audits"):
+        return "feedback"
     if path == "/api/skills/discover":
         return "discovery"
     if path.startswith("/api/career/orchestrator/runs"):
         return "orchestrator"
     if path.startswith("/api/auth/"):
         return "auth"
+    if path.startswith("/api/market/"):
+        return "market"
     return "default"
 
 
@@ -147,6 +155,8 @@ class RateLimitMiddleware:
             discovery_limit=_configured_rate("SKILLFAIR_DISCOVERY_RATE_LIMIT_PER_MINUTE", 5),
             orchestrator_limit=_configured_rate("SKILLFAIR_ORCHESTRATOR_RATE_LIMIT_PER_MINUTE", 20),
             auth_limit=_configured_rate("SKILLFAIR_AUTH_RATE_LIMIT_PER_MINUTE", 10),
+            feedback_limit=_configured_rate("SKILLFAIR_FEEDBACK_RATE_LIMIT_PER_MINUTE", 10),
+            market_limit=_configured_rate("SKILLFAIR_MARKET_RATE_LIMIT_PER_MINUTE", 10),
         )
 
     async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
@@ -272,3 +282,49 @@ class RequestBodyLimitMiddleware:
             if not disconnected:
                 response_rejected = True
                 await _send_json(send, 413, {"detail": "Request body exceeds the configured size limit."})
+
+
+class SecurityHeadersMiddleware:
+    """Add conservative browser security headers to application responses."""
+
+    _HEADERS = (
+        (b"x-content-type-options", b"nosniff"),
+        (b"x-frame-options", b"DENY"),
+        (b"referrer-policy", b"strict-origin-when-cross-origin"),
+        (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+        (b"content-security-policy", b"default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+    )
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def secure_send(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", []))
+                present = {key.lower() for key, _ in headers}
+                if str(scope.get("path", "")).startswith("/api/"):
+                    # API responses can contain account-specific data. Enforce
+                    # this at the backend too, including direct Render access.
+                    headers = [(key, value) for key, value in headers if key.lower() != b"cache-control"]
+                    headers.append((b"cache-control", b"no-store"))
+                    present.add(b"cache-control")
+                for name, value in self._HEADERS:
+                    # FastAPI's bundled Swagger/ReDoc documents load scripts and
+                    # styles; CSP belongs on API/documentless responses only.
+                    if name == b"content-security-policy" and scope.get("path") in {"/docs", "/redoc", "/docs/oauth2-redirect"}:
+                        continue
+                    if name not in present:
+                        headers.append((name, value))
+                # Do not trust forwarded-proto headers. A TLS-terminating proxy
+                # must set HSTS itself when the backend connection is HTTP.
+                if scope.get("scheme") == "https" and b"strict-transport-security" not in present:
+                    headers.append((b"strict-transport-security", b"max-age=15552000"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, secure_send)

@@ -265,3 +265,105 @@ class CandidateFeedback(Base):
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Free-text feedback is intentionally not stored.
+
+
+class CandidateExperienceFeedback(Base):
+    """Current account-associated feedback; legacy candidate_feedback is untouched."""
+    __tablename__ = "candidate_experience_feedback"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "submission_id", name="uq_candidate_experience_owner_submission"),
+        CheckConstraint("application_experience BETWEEN 1 AND 5", name="ck_candidate_experience_application_rating"),
+        CheckConstraint("process_accessibility BETWEEN 1 AND 5", name="ck_candidate_experience_accessibility_rating"),
+        CheckConstraint("job_requirements_clarity BETWEEN 1 AND 5", name="ck_candidate_experience_requirements_rating"),
+        CheckConstraint("perceived_fairness BETWEEN 1 AND 5", name="ck_candidate_experience_fairness_rating"),
+        Index("ix_candidate_experience_owner_submitted", "owner_user_id", "submitted_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    submission_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    consent_to_aggregate: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    application_experience: Mapped[int] = mapped_column(Integer, nullable=False)
+    process_accessibility: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_requirements_clarity: Mapped[int] = mapped_column(Integer, nullable=False)
+    perceived_fairness: Mapped[int] = mapped_column(Integer, nullable=False)
+    suggestion_categories: Mapped[list[str]] = mapped_column(
+        _JSON_DOCUMENT,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BiasAudit(Base):
+    """Standalone deterministic audit result, scoped to its authenticated owner."""
+    __tablename__ = "bias_audits"
+    __table_args__ = (
+        UniqueConstraint("id", "owner_user_id", name="uq_bias_audits_id_owner"),
+        UniqueConstraint("public_id", name="uq_bias_audits_public_id"),
+        Index("ix_bias_audits_owner_created", "owner_user_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    public_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    job_title: Mapped[str | None] = mapped_column(String(160))
+    result_snapshot: Mapped[dict[str, object]] = mapped_column(_JSON_DOCUMENT, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class BiasAuditReviewSelection(Base):
+    """Per-finding reviewer selection; a composite FK enforces audit ownership."""
+    __tablename__ = "bias_audit_review_selections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["audit_id", "owner_user_id"],
+            ["bias_audits.id", "bias_audits.owner_user_id"],
+            ondelete="CASCADE",
+            name="fk_bias_audit_review_selections_audit_owner",
+        ),
+        UniqueConstraint("audit_id", "finding_index", name="uq_bias_audit_review_finding"),
+        CheckConstraint("finding_index >= 0", name="ck_bias_audit_review_finding_index"),
+        CheckConstraint("review_state IN ('needs_review', 'accepted', 'edited', 'dismissed')", name="ck_bias_audit_review_state"),
+        Index("ix_bias_audit_review_owner_audit", "owner_user_id", "audit_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    audit_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    finding_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    review_state: Mapped[str] = mapped_column(String(20), nullable=False, default="needs_review", server_default="needs_review")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class UserNotification(Base):
+    """Account-owned notifications derived from committed workflow events."""
+    __tablename__ = "user_notifications"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workflow_id", "owner_user_id"],
+            ["career_workflows.id", "career_workflows.owner_user_id"],
+            ondelete="CASCADE",
+            name="fk_user_notifications_workflow_owner",
+        ),
+        UniqueConstraint("owner_user_id", "source_event_key", name="uq_user_notifications_owner_event"),
+        UniqueConstraint("public_id", name="uq_user_notifications_public_id"),
+        CheckConstraint("notification_type IN ('workflow_decision', 'learning_pathways_ready')", name="ck_user_notifications_type"),
+        Index("ix_user_notifications_owner_created", "owner_user_id", "created_at"),
+        Index("ix_user_notifications_owner_unread", "owner_user_id", "read_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    public_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    workflow_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    source_event_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    notification_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    message: Mapped[str] = mapped_column(String(400), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
